@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# docker-compose.yml — run the Trellis REST "bridge" on the DGX.
+#
+# This compose file assumes the bridge image is already built (see
+# Dockerfile) OR builds it here. Two services are optional:
+#   - trellis_bridge (the API, :7861) — REQUIRED
+#   - trellis_gradio (the human UI, :7860) — OPTIONAL
+#
+# Bring up the bridge:
+#   docker compose up -d trellis_bridge
+#
+# Bring up Gradio (human UI) alongside:
+#   docker compose up -d trellis_gradio
+#
+# Tear everything down:
+#   docker compose down
+# ---------------------------------------------------------------------------
+
+services:
+
+  # -- The API bridge (what the MCP server / agent talks to) -----
+  trellis_bridge:
+    # Build the bridge from this repo. Adjust the build context to
+    # your checkout of this repo.
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Replace with the image your DGX already runs for Trellis
+        # (the one serving the Gradio app on :7860). This base must
+        # contain the trellis2 conda env + all the model/pipeline deps.
+        BASE_IMAGE: ${TRELLIS_BASE_IMAGE:-nvcr.io/nvidia/dgx/trellis2:latest}
+    image: hermes-trellis-bridge:local
+    container_name: trellis_bridge
+    ports:
+      - "${BRIDGE_PORT:-7861}:7861"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=7861
+      - TRELLIS_BRIDGE_OUT=/workspace/out
+      - TRELLIS_MODEL_ID=${TRELLIS_MODEL_ID:-microsoft/TRELLIS.2-4B}
+      # Where the pipeline assets / caches live (inherited from base).
+    volumes:
+      - ./out:/workspace/out
+      # Mount the HF + torch + triton caches so restarts don't
+      # re-download (if they live in the repo).
+      - ./hf_cache:/workspace/cache/huggingface
+      - ./torch_cache:/workspace/cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # -- The Gradio human UI (OPTIONAL; the API bridge is enough) -----
+  # Runs the same image but the app on :7860 (the app the user asked
+  # for). Kept here so a single compose manages both the API and the
+  # UI; disable by omitting the service.
+  trellis_gradio:
+    image: hermes-trellis-bridge:local
+    container_name: trellis_gradio
+    ports:
+      - "${GRADIO_PORT:-7860}:7860"
+    environment:
+      # Point at the same pipeline; the Gradio app (if present in the
+      # base image) binds :7860. If the base image's entrypoint is the
+      # bridge, this override switches it to the Gradio app.
+      - APP_SCRIPT=${APP_SCRIPT:-app.py}
+    volumes:
+      - ./out:/workspace/out
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
