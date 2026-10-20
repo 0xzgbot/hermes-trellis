@@ -10,7 +10,7 @@
  *
  * Point it at your box:
  *   TRELLIS_API_URL  base URL of the Trellis REST front
- *                       (default http://127.0.0.1:7861)
+ *                       (default http://127.0.0.1:7861; set TRELLIS_API_URL to point at your DGX)
  *   TRELLIS_GRADIO_URL  (optional) Gradio UI base, default derived
  */
 

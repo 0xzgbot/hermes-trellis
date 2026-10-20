@@ -70,7 +70,7 @@ desktop SDK provides and adjust the one matching line.
 
 ## Environment
 
-- `TRELLIS_API_URL` — the bridge base URL (default `http://127.0.0.1:7861`).
+- `TRELLIS_API_URL` — the bridge base URL (default `http://127.0.0.1:7861`; set to your DGX URL).
 - `TRELLIS_OUT_DIR` — where preview frames are written (default
   `<plugin>/out`).
 

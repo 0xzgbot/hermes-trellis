@@ -5,14 +5,14 @@
  * Instantiate an McpServer, register every Trellis tool from
  * tools.ts against a shared bridge client, and connect over
  * stdio. The client points at the local Trellis service on the
- * DGX Spark via TRELLIS_API_URL (default http://127.0.0.1:7861).
+ * DGX Spark via TRELLIS_API_URL (default http://127.0.0.1:7861; set TRELLIS_API_URL to your DGX URL).
  *
  * Register in ~/.hermes/config.yaml:
  *   mcp_servers:
  *     trellis:
  *       command: node
  *       args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
- *       env: { TRELLIS_API_URL: "http://127.0.0.1:7861" }
+ *       env: { TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:7861" }
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

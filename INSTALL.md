@@ -13,7 +13,7 @@ Full, end-to-end install: **DGX Spark** (Trellis + bridge), **Mac** (MCP server 
 | DGX Spark | A **Trellis base image** with the `trellis2` conda env (torch, trellis2, o_voxel, nvdiffrast, flash-attn, flexgemm, ...) | the image your Gradio app (`dr-vij/Trellis2-DGX-Spark-Docker`) runs in |
 | DGX Spark | Hugging Face **token** with access to gated models (DINOv3, RMBG-2.0) + `microsoft/TRELLIS.2-4B` in the HF cache | `.env` `HF_TOKEN`; `HF_HOME` |
 | Mac | Node **≥ 18** (Meshy wants 22; we need 18+) | `node -v` |
-| Mac | Reachability to the DGX over the tailnet | `ping 127.0.0.1` |
+| Mac | Reachability to the DGX over the tailnet | `ping <DGX-TAILNET-IP>` |
 
 > You already run Trellis on the Spark (Gradio `:7860`). The bridge is **layered on top of
 > that same runtime** — it does not duplicate the heavy env. If you don't have
@@ -46,7 +46,7 @@ docker compose logs -f trellis_bridge
 ```bash
 curl -s localhost:7861/health
 # { "up": true, "model_loaded": false, "busy": false,
-#   "model_id": "microsoft/TRELLIS.2-4B", "url": "http://127.0.0.1:7861", ... }
+#   "model_id": "microsoft/TRELLIS.2-4B", "url": "http://<DGX-TAILNET-IP>:7861", ... }
 ```
 
 `model_loaded` is `false` until the first job (or an explicit start) loads the
@@ -82,7 +82,7 @@ npm run typecheck    # optional: tsc --noEmit
 
 ```bash
 node dist/index.js
-# [trellis-mcp] connected. bridge=http://127.0.0.1:7861 out=...
+# [trellis-mcp] connected. bridge=http://<DGX-TAILNET-IP>:7861 out=...
 # (waits on stdin for JSON-RPC; Ctrl-C to quit)
 ```
 
@@ -108,7 +108,7 @@ mcp_servers:
     args:
       - "/absolute/path/to/hermes-trellis/mcp/dist/index.js"   # absolute
     env:
-      TRELLIS_API_URL: "http://127.0.0.1:7861"
+      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:7861"
       TRELLIS_OUT_DIR: "/absolute/path/to/hermes-trellis/trellis-out"
 ```
 
@@ -149,7 +149,7 @@ your desktop SDK version (see `desktop/README.md`).
 
 ```bash
 # (DGX) bridge healthy
-curl -s 127.0.0.1:7861/health
+curl -s <DGX-TAILNET-IP>:7861/health
 
 # (Mac) MCP + contract
 cd hermes-trellis && node tests/smoke.mjs

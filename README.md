@@ -98,7 +98,7 @@ curl -s localhost:7861/health                          # {"up":true,"model_loade
 **2. On the Mac — build the MCP server:**
 ```bash
 cd hermes-trellis/mcp && npm install && npm run build
-node dist/index.js        # stdio MCP (talks to http://127.0.0.1:7861)
+node dist/index.js        # stdio MCP (talks to your DGX bridge - set TRELLIS_API_URL in config)
 ```
 
 **3. Wire it into Hermes** — register the MCP server and load the skill:
@@ -109,7 +109,7 @@ mcp_servers:
     command: node
     args: ["~/code/hermes-trellis/mcp/dist/index.js"]
     env:
-      TRELLIS_API_URL: "http://127.0.0.1:7861"
+      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:7861"   # your DGX address
       TRELLIS_OUT_DIR: "~/code/hermes-trellis/trellis-out"
 ```
 ```bash
@@ -137,7 +137,7 @@ The **model half** (Trellis.2 actually generating the mesh) runs only on the DGX
 
 | Var | Where | Meaning | Default |
 |---|---|---|---|
-| `TRELLIS_API_URL` | Mac | Bridge base URL | `http://127.0.0.1:7861` |
+| `TRELLIS_API_URL` | Mac | Bridge base URL | `http://127.0.0.1:7861` (set to your DGX URL) |
 | `TRELLIS_OUT_DIR` | Mac | Where downloads/renders land | `<cwd>/trellis-out` |
 | `TRELLIS_MODEL_ID` | DGX | The 3D model id ("other models" knob) | `microsoft/TRELLIS.2-4B` |
 | `HF_TOKEN` | DGX | Gated-model access (DINOv3, RMBG-2.0) | — |

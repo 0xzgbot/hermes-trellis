@@ -58,7 +58,7 @@ On the **Mac** (for the MCP server):
 
 | Var | Meaning | Default |
 |---|---|---|
-| `TRELLIS_API_URL` | Base URL of the DGX bridge REST front | `http://127.0.0.1:7861` |
+| `TRELLIS_API_URL` | Base URL of the DGX bridge REST front | `http://127.0.0.1:7861` (set to your DGX URL) |
 | `TRELLIS_OUT_DIR` | Where downloads/renders land when no path is given | `<cwd>/trellis-out` |
 | `TRELLIS_TIMEOUT_MS` | Per-request timeout to the bridge | `20000` |
 | `TRELLIS_MODEL_ID` | The 3D model id (for "other models") | `microsoft/TRELLIS.2-4B` |
