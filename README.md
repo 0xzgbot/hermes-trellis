@@ -24,15 +24,21 @@ Set `TRELLIS_PYTHON` to a Python that already has `trimesh`. `face_budget` also 
 
 ## What it reaches outside the chat
 
-The MCP server calls `TRELLIS_API_URL` (default `http://127.0.0.1:8188`). It uploads the photo, queues the graph, and downloads the GLB and the preview PNGs. That host is the ComfyUI you already run.
+The MCP server talks to `TRELLIS_API_URL` (default `http://127.0.0.1:8188`), including the `/ws` progress socket. It uploads the photo, queues the graph, and downloads the GLB and the preview PNGs. With `TRELLIS_BACKEND=bridge` it talks to `TRELLIS_BRIDGE_URL` (default `http://127.0.0.1:7861`) instead.
 
-`trellis_download` reads the image path you pass and writes STL, OBJ, or GLB to the path you name, or under `TRELLIS_OUT_DIR`.
+An image argument that is an `http` or `https` URL is downloaded on the Hermes machine and then uploaded to that host. A local path is read from disk. A `data:` URL is decoded in memory.
 
-`trellis_open_slicer` starts `open` (macOS), `cmd` (Windows), or `xdg-open` on one `.stl` file. On macOS it uses OrcaSlicer, PrusaSlicer, BambuStudio, or Creality Print when that app is installed.
+`trellis_download` writes STL, OBJ, or GLB to the path you name, or under `TRELLIS_OUT_DIR`. STL and OBJ conversion runs `TRELLIS_PYTHON` (default `python3`) on `mcp/print_mesh.py`.
 
-The dashboard route `GET /api/plugins/trellis/model` reads one `.glb`, `.gltf`, `.stl`, or `.png` under your home directory or `TRELLIS_OUT_DIR`. `GET /api/plugins/trellis/status` calls the same ComfyUI URL.
+`trellis_wait_task` stays inside that tool call until the job finishes or the timeout (default 1800 seconds, maximum 3600). It does not start a background process.
 
-If `mcp/dist/index.js` is missing, `mcp/run.sh` runs `npm ci` and `tsc` once. That contacts the npm registry. The plugin stores no API key and sends no telemetry. `docker/trellis-api` is not started by Hermes.
+`trellis_open_slicer` starts `open` on macOS, `xdg-open` on Linux, or `explorer.exe` on Windows, on one `.stl` file. On macOS it uses OrcaSlicer, PrusaSlicer, BambuStudio, or Creality Print when that app is installed.
+
+`GET /api/plugins/trellis/model` reads any `.glb`, `.gltf`, `.stl`, or `.png` whose path is under your home directory or `TRELLIS_OUT_DIR`. `GET /api/plugins/trellis/status` calls the ComfyUI URL. Running `desktop/plugin.py` calls the same URL.
+
+If `mcp/dist/index.js` is missing, `mcp/run.sh` runs `npm ci` and `tsc` once. That contacts the npm registry and writes `mcp/node_modules`. It does not replace the plugin's own files.
+
+The plugin reads no API key, no `.env`, and no credential store. It sends no telemetry. Hermes does not start `docker/trellis-api`. If you start that process yourself, it can download an image URL and run `nvidia-smi`, `gltf-transform`, or Blender.
 
 ## What it gives you
 
@@ -141,7 +147,7 @@ The plugin expects the ComfyUI API at `http://<DGX-TAILNET-IP>:8188` (see
 **2. On the Mac — build the MCP server:**
 ```bash
 cd hermes-trellis/mcp
-npm install && npm run build     # tsc → dist/
+npm ci && npm run build         # tsc → dist/
 npm run typecheck                # optional: strict re-check
 ```
 

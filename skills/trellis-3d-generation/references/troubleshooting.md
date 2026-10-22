@@ -25,7 +25,7 @@ Read the tool error first. It names the HTTP status or the Python exception.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Set TRELLIS_PYTHON` / `No module named trimesh` | The MCP process's Python has no trimesh | Install trimesh in that interpreter, or set `TRELLIS_PYTHON` to one that has it. |
-| `fast-simplification` | `face_budget` was set and that package is missing | `pip install fast-simplification` in `TRELLIS_PYTHON`, or omit `face_budget`. |
+| `fast-simplification` | `face_budget` was set and that package is missing | Install `fast-simplification` in `TRELLIS_PYTHON`, or omit `face_budget`. |
 | FBX or USDZ refused | Those formats are not implemented | Download GLB or STL. |
 | Watertight is false after `repair: true` | Hole fill did not close the mesh | Say so. The slicer may still accept it. Do not claim it is manifold. |
 | Four view hashes are identical | The turntable did not change the yaw | Treat the preview as failed. Do not describe it as four angles. |

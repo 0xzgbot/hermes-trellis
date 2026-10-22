@@ -50,16 +50,16 @@ curl -s localhost:8188/system_stats | head -c 300
 
 ```bash
 cd hermes-trellis/mcp
-npm install
+npm ci
 npm run build          # writes dist/  (dist/ is gitignored)
 npm run typecheck      # optional
 ```
 
 Python for STL and decimation. Use whatever interpreter has trimesh, and point the server at it:
 
+That interpreter needs the `trimesh` and `fast-simplification` packages already installed. This repo does not install them.
+
 ```bash
-python3 -m pip install 'trimesh' 'fast-simplification'
-# confirm
 python3 -c "import trimesh, fast_simplification; print(trimesh.__version__)"
 python3 print_mesh.py self-test
 ```

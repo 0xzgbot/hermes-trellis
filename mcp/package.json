@@ -1,6 +1,6 @@
 {
   "name": "trellis-mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for driving a local Trellis.2 image->3D (->STL/GLB/...) service on a DGX Spark.",
   "type": "module",
   "license": "MIT",

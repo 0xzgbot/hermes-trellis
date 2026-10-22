@@ -12,17 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # ----------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------
 API_URL = os.environ.get("TRELLIS_API_URL", "http://127.0.0.1:8188").rstrip("/")
-OUT_DIR = Path(os.environ.get("TRELLIS_OUT_DIR",
-                                    Path(__file__).resolve().parent / "out"))
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-SKILL_DIR = Path(__file__).resolve().parent.parent / "skills" / "trellis-3d-generation"
 
 
 # ----------------------------------------------------------------------------
@@ -97,81 +92,6 @@ def render_frame(task_id: str, mode: str = "solid", out: Optional[str] = None) -
     """Previews are written by trellis_render_preview. This hook does not invent one."""
     del task_id, mode, out
     return None
-
-
-# ----------------------------------------------------------------------------
-# Plugin entrypoint / registration.
-#
-# `context` is the Hermes desktop plugin context (SDK-provided). The
-# documented surface includes `context.register_skill(name, skill_md_path)`.
-# Additional hook registrations (status bar, chat renderer, gallery
-# panel) are wired below; adjust names to your desktop SDK.
-# ----------------------------------------------------------------------------
-def register(context: Any) -> None:
-    # 1) Bundled skill -> agent knows the Trellis pipeline.
-    skill_md = SKILL_DIR / "SKILL.md"
-    if skill_md.exists():
-        context.register_skill("trellis-3d-generation", str(skill_md))
-
-    # 2) Status bar: periodic refresh of service state + usage.
-    _register_status_bar(context)
-
-    # 3) Chat renderer: on generation completion, show a preview frame.
-    _register_chat_renderer(context)
-
-    # 4) Gallery: a panel / on-demand montage of generated models.
-    _register_gallery(context)
-
-
-def _safe(fn: Callable, *a, **k):
-    """Call an SDK hook if present (tolerate absence/version differences)."""
-    try:
-        return fn(*a, **k)
-    except Exception:
-        return None
-
-
-def _register_status_bar(context: Any) -> None:
-    def refresh() -> Optional[str]:
-        s = service_state()
-        dot = "\u25cf" if s.get("running") else "\u25cb"
-        busy = " \u00b7 gen\u2026" if s.get("busy") else ""
-        return ("Trellis %s %s%s   \u00b7  %s models   \u00b7  ~%.0f s GPU"
-                % (dot, "running" if s.get("running") else "stopped", busy,
-                   s.get("models_generated", 0), s.get("gpu_seconds", 0)))
-    # Different SDKs expose the status bar differently; try common hooks.
-    _safe(getattr(context, "register_status_bar", None), refresh)
-    _safe(getattr(context, "register_statusbar", None), refresh)
-    _safe(getattr(context, "set_status", None), refresh)
-
-
-def _register_chat_renderer(context: Any) -> None:
-    """
-    When the agent finishes a Trellis generation, emit a rendered
-    preview inline in chat (a MEDIA: image). Hooked to the generation
-    completion (task -> completed).
-    """
-    def on_completed(task_id: str, mode: str = "normal") -> Optional[str]:
-        path = render_frame(task_id, mode=mode)
-        if not path:
-            return None
-        # The desktop app renders `MEDIA:<abs path>` inline as an image.
-        return "MEDIA:%s" % path
-
-    _safe(getattr(context, "register_chat_hook", None), on_completed)
-    _safe(getattr(context, "register_tool", None),
-           "trellis_show_preview",
-           lambda task_id, mode="normal": on_completed(task_id, mode))
-
-
-def _register_gallery(context: Any) -> None:
-    """A gallery of all generated models (panel + on-demand montage)."""
-    def panel(limit: int = 24) -> List[Dict[str, Any]]:
-        return gallery(limit)
-
-    _safe(getattr(context, "register_panel", None), "Trellis Gallery", panel)
-    _safe(getattr(context, "register_tool", None),
-           "trellis_gallery", panel)
 
 
 if __name__ == "__main__":

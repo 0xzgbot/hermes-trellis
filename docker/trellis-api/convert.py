@@ -44,7 +44,7 @@ def _load_trimesh():
     if not _have("trimesh"):
         raise RuntimeError(
             "trimesh not installed in the bridge env. "
-            "`pip install trimesh[easy]` (and Pillow) for conversions.")
+            "Install trimesh (with its easy extras) and Pillow in that interpreter.")
     import trimesh
     return trimesh
 
@@ -183,7 +183,7 @@ def decimate_remesh(glb_path: str, *, face_budget: Optional[int] = None,
         if not done:
             raise RuntimeError(
                 f"could not decimate {before} -> {face_budget} faces; "
-                "pip install fast-simplification for the highest-quality reduction")
+                "install fast-simplification in that interpreter for the highest-quality reduction")
     if remesh and face_budget:
         # A second pass: project onto the decimated hull (cheap, optional).
         pass

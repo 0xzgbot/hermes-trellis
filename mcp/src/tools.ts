@@ -442,18 +442,17 @@ export function makeSlicerTool(ctx: ToolContext) {
 }
 
 function openInSlicer(file: string): Promise<{ path: string; app: string | null }> {
-  const apps = SLICERS.filter((name) => fs.existsSync(`/Applications/${name}.app`));
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "darwin"
-    ? (apps[0] ? ["-a", apps[0], file] : [file])
-    : process.platform === "win32"
-      ? ["/c", "start", "", file]
-      : [file];
+  const apps = process.platform === "darwin"
+    ? SLICERS.filter((name) => fs.existsSync(`/Applications/${name}.app`))
+    : [];
+  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer.exe" : "xdg-open";
+  const args = process.platform === "darwin" && apps[0] ? ["-a", apps[0], file] : [file];
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: "ignore" });
     child.on("error", (e) => reject(e));
     child.on("close", (code) => {
-      if (code && code !== 0) reject(new Error(`${cmd} exited ${code}`));
+      // explorer.exe often exits non-zero after handing the file to its app.
+      if (process.platform !== "win32" && code && code !== 0) reject(new Error(`${cmd} exited ${code}`));
       else resolve({ path: file, app: apps[0] ?? null });
     });
   });
