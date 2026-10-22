@@ -19,8 +19,11 @@ function readGlb(buffer) {
   if (!prim) throw new Error("GLB has no mesh");
   const posAcc = json.accessors[prim.attributes.POSITION];
   const idxAcc = prim.indices != null ? json.accessors[prim.indices] : null;
+  const nrmAcc = prim.attributes.NORMAL != null ? json.accessors[prim.attributes.NORMAL] : null;
+  const positions = readAccessor(json, bin, posAcc);
   return {
-    positions: readAccessor(json, bin, posAcc),
+    positions,
+    normals: nrmAcc ? readAccessor(json, bin, nrmAcc) : positions,
     indices: idxAcc ? readAccessor(json, bin, idxAcc) : null,
   };
 }
@@ -60,9 +63,12 @@ function ModelCard({ glb, stl }) {
     }
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(400 * dpr);
+    canvas.height = Math.round(280 * dpr);
     let stopped = false;
     let raf = 0;
-    const gl = canvas.getContext("webgl");
+    const gl = canvas.getContext("webgl", { antialias: true });
     if (!gl) {
       setError("WebGL is not available in this view.");
       return undefined;
@@ -105,10 +111,10 @@ function ModelCard({ glb, stl }) {
 
 function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
-  gl.shaderSource(vs, "attribute vec3 p; uniform float yaw; uniform float pitch; varying vec3 vN; void main(){ float c=cos(yaw),s=sin(yaw),cp=cos(pitch),sp=sin(pitch); vec3 r=vec3(c*p.x+s*p.z,p.y,-s*p.x+c*p.z); r=vec3(r.x,cp*r.y-sp*r.z,sp*r.y+cp*r.z); vN=r; vec3 e=r+vec3(0.0,-0.05,-2.6); gl_Position=vec4(e.x*3.2,e.y*4.2,e.z*0.15,-e.z); }");
+  gl.shaderSource(vs, "attribute vec3 p; attribute vec3 n; uniform float yaw; uniform float pitch; varying vec3 vN; void main(){ float c=cos(yaw),s=sin(yaw),cp=cos(pitch),sp=sin(pitch); vec3 r=vec3(c*p.x+s*p.z,p.y,-s*p.x+c*p.z); r=vec3(r.x,cp*r.y-sp*r.z,sp*r.y+cp*r.z); vec3 rn=vec3(c*n.x+s*n.z,n.y,-s*n.x+c*n.z); rn=vec3(rn.x,cp*rn.y-sp*rn.z,sp*rn.y+cp*rn.z); vN=rn; vec3 e=r+vec3(0.0,-0.02,-2.6); gl_Position=vec4(e.x*3.2,e.y*4.2,e.z*0.15,-e.z); }");
   gl.compileShader(vs);
   const fs = gl.createShader(gl.FRAGMENT_SHADER);
-  gl.shaderSource(fs, "precision mediump float; varying vec3 vN; uniform vec3 color; void main(){ vec3 n=normalize(vN); float light=0.35+0.65*max(0.0,dot(n,normalize(vec3(0.35,0.75,0.55)))); gl_FragColor=vec4(color*light,1.0); }");
+  gl.shaderSource(fs, "precision highp float; varying vec3 vN; uniform vec3 color; void main(){ vec3 N=normalize(vN); float key=max(dot(N,normalize(vec3(0.35,0.85,0.45))),0.0); float fill=max(dot(N,normalize(vec3(-0.55,0.15,0.55))),0.0); float rim=pow(1.0-max(dot(N,vec3(0.0,0.0,1.0)),0.0),2.0); gl_FragColor=vec4(color*(0.18+0.70*key+0.22*fill)+vec3(0.05)*rim,1.0); }");
   gl.compileShader(fs);
   const prog = gl.createProgram();
   gl.attachShader(prog, vs);
@@ -121,6 +127,12 @@ function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
   const loc = gl.getAttribLocation(prog, "p");
   gl.enableVertexAttribArray(loc);
   gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  const nbuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, nbuf);
+  gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
+  const nloc = gl.getAttribLocation(prog, "n");
+  gl.enableVertexAttribArray(nloc);
+  gl.vertexAttribPointer(nloc, 3, gl.FLOAT, false, 0, 0);
   let ibo = null;
   if (mesh.indices) {
     ibo = gl.createBuffer();
@@ -144,6 +156,7 @@ function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
   };
   gl.getExtension("OES_element_index_uint");
   gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
   const frame = () => {
     if (!drag) yaw += 0.005;
     gl.viewport(0, 0, canvas.width, canvas.height);
