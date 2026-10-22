@@ -121,7 +121,7 @@ hermes plugins enable trellis
 
 Then in Desktop: Capabilities → Plugins → enable the Trellis desktop half, and Rescan if the orbit card does not appear. Settings → Plugins → Trellis holds the ComfyUI URL, the Python path, and the output folder.
 
-`mcp.json` starts `mcp/run.sh`. If `dist/index.js` is missing, that script runs `npm install` and `npm run build` once. Node and npm must be on `PATH`.
+`mcp.json` starts `mcp/run.sh`. If `dist/index.js` is missing, that script runs `npm ci` and `npm run build` once. Node and npm must be on `PATH`. `npm ci` uses `mcp/package-lock.json` and contacts the npm registry.
 
 With the desktop half on, the agent puts this in its own paragraph after a download:
 

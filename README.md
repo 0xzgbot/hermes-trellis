@@ -22,6 +22,18 @@ Set `TRELLIS_API_URL` to `http://<gpu-host>:8188`. That address is not in the re
 
 Set `TRELLIS_PYTHON` to a Python that already has `trimesh`. `face_budget` also needs `fast-simplification`. The Node build does not install either package.
 
+## What it reaches outside the chat
+
+The MCP server calls `TRELLIS_API_URL` (default `http://127.0.0.1:8188`). It uploads the photo, queues the graph, and downloads the GLB and the preview PNGs. That host is the ComfyUI you already run.
+
+`trellis_download` reads the image path you pass and writes STL, OBJ, or GLB to the path you name, or under `TRELLIS_OUT_DIR`.
+
+`trellis_open_slicer` starts `open` (macOS), `cmd` (Windows), or `xdg-open` on one `.stl` file. On macOS it uses OrcaSlicer, PrusaSlicer, BambuStudio, or Creality Print when that app is installed.
+
+The dashboard route `GET /api/plugins/trellis/model` reads one `.glb`, `.gltf`, `.stl`, or `.png` under your home directory or `TRELLIS_OUT_DIR`. `GET /api/plugins/trellis/status` calls the same ComfyUI URL.
+
+If `mcp/dist/index.js` is missing, `mcp/run.sh` runs `npm ci` and `tsc` once. That contacts the npm registry. The plugin stores no API key and sends no telemetry. `docker/trellis-api` is not started by Hermes.
+
 ## What it gives you
 
 | Feature | Detail |
@@ -82,7 +94,7 @@ hermes-trellis/
 ├── INSTALL.md                   # full install (DGX + Mac + Hermes)
 ├── docker/                          # (optional legacy bridge — kept, not required)
 ├── mcp/
-│   ├── run.sh                       # builds dist/ on first start, then runs the server
+│   ├── run.sh                       # npm ci + tsc on first start, then runs the server
 │   ├── print_mesh.py                # trimesh STL, decimate, scale, repair
 │   ├── package.json / tsconfig.json
 │   └── src/
@@ -207,6 +219,12 @@ DGX GPU; the plumbing around it is what's proven here.
 rigging, and animation. This plugin does none of those. It needs a photo.
 There is no text checkpoint on the ComfyUI install this was built against,
 so the agent asks for an image instead of inventing one.
+
+## Catalog
+
+`hermes plugins validate` passes on this tree. Hermes loads the MCP server because `plugin.json` is the manifest. A `plugin.yaml` in this directory would replace that manifest, and the tools would not register.
+
+The entry to submit is `catalog/trellis.yaml`. Copy it to `plugin-catalog/trellis.yaml` in [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and open the pull request from the account that owns this repository. The `sha` field is the commit the catalog installs.
 
 ## License
 
