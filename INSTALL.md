@@ -85,8 +85,8 @@ Put this in the **main** config, `~/.hermes/config.yaml`. An entry that exists o
 ```yaml
 mcp_servers:
   trellis:
-    command: node
-    args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
+    command: sh
+    args: ["/absolute/path/to/hermes-trellis/mcp/run.sh"]
     env:
       TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"
       TRELLIS_BACKEND: "comfyui"
@@ -121,7 +121,7 @@ hermes plugins enable trellis
 
 Then in Desktop: Capabilities → Plugins → enable the Trellis desktop half, and Rescan if the orbit card does not appear. Settings → Plugins → Trellis holds the ComfyUI URL, the Python path, and the output folder.
 
-Build `mcp/dist` before enabling. The server command is `node ${PLUGIN_ROOT}/mcp/dist/index.js`.
+`mcp.json` starts `mcp/run.sh`. If `dist/index.js` is missing, that script runs `npm install` and `npm run build` once. Node and npm must be on `PATH`.
 
 With the desktop half on, the agent puts this in its own paragraph after a download:
 
@@ -145,7 +145,7 @@ A live ComfyUI prints `running: True` and a count of Trellis history rows. Hook 
 
 On the GPU host, ComfyUI is up. On the Hermes machine:
 
-> "Make a printable STL of this photo at 1024, 10 cm tall, about 20k faces, and show me four solid views."
+> "Make a printable STL of this photo, as much detail as possible, 10 cm tall, and show me four solid views."
 
 The agent should:
 

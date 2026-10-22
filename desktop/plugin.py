@@ -1,28 +1,11 @@
 """
-plugin.py — Hermes desktop integration for the Trellis plugin.
+Terminal status check for ComfyUI. The Desktop UI is desktop/plugin.js.
 
-Wires the local Trellis 3D work into the Hermes **desktop app** — the
-same integration the Meshy plugin ships (rendered models in chat, a
-status bar, a gallery). It is the "desktop" counterpart of the MCP
-server + skill: the agent generates a model via the `trellis_*` tools,
-and this plugin makes the *result visible* in the app.
-
-Architecture
-------------
-ComfyUI 0.42 is the runtime on the DGX (:8188); this plugin talks to
-its standard endpoints:
-  GET  /system_stats   → health (up / model_loaded / busy / model_id)
-  GET  /history       → the flat list the gallery + usage read from
-  GET  /view?filename&... → binary outputs (preview PNG, exported files)
-
-The MCP server (`mcp/dist/index.js`) and the skill (`trellis-3d-generation`)
-do the generation; the desktop plugin only *surfaces* it. Render previews
-used in chat come from the agent's `trellis_render_preview` tool
-(`MEDIA:<frame>`), not from this plugin.
+Reads GET /system_stats, /queue, and /history. It does not generate a mesh
+and it does not render. Preview PNGs come from trellis_render_preview.
 
 Env:
   TRELLIS_API_URL  ComfyUI base URL (default http://127.0.0.1:8188)
-  TRELLIS_OUT_DIR  where previews/exports land
 """
 
 from __future__ import annotations

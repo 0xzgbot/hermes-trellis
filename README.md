@@ -1,12 +1,8 @@
 # hermes-trellis — Trellis 3D for Hermes Agent
 
-A **Hermes Agent plugin** that drives the local **Trellis.2** model (4B) on a
-**DGX Spark** to turn an **image into a fully-textured 3D model** — and
-**export it as GLB** (the server's native output), with **STL for print/cast**
-produced by a local GLB→STL conversion. It is the faithful analogue of the
-**Meshy** plugin (MCP + Skill + desktop integration: rendered models in
-chat, status bar, gallery) — but it runs **Trellis** (an open, local image→3D
-model) instead of Meshy's proprietary cloud.
+A **Hermes Agent plugin** that turns one photo into a printable STL. Trellis.2
+runs on a ComfyUI GPU host. The Hermes machine writes a checked binary STL.
+There is no cloud API, no subscription, no rigging, and no animation.
 
 The GPU host runs Trellis.2 and the four solid views. The Hermes machine
 runs the agent, the MCP server, and trimesh. ComfyUI writes a GLB. `trellis_download`
@@ -20,15 +16,16 @@ loads `trellis_2_int8_convrot.safetensors` by name.
 |---|---|
 | **Image → 3D** | One conditioning image → a textured 3D asset. The core (Trellis has no text-to-3D / multi-view). |
 | **PBR texturing** | Baked into image→3D. `trellis_texturize` re-runs that job. It does not recolor an existing GLB. |
-| **Decimation** | Local trimesh (`trellis_remesh_decimate`). Default 200k faces. Hole fill when `remesh` is true. |
+| **Decimation** | The Spark keeps about 1,000,000 faces. A second cut happens only if you pass `face_budget`. |
 | **Export** | **GLB** from ComfyUI. **STL** and **OBJ** via local trimesh. The STL byte size is checked. FBX and USDZ are refused. |
 | **Print preview** | Four solid `RenderMesh` views (0/90/180/270). Modes: auto, texture, vertex colors, solid, normal, depth. |
 | **Task mgmt** | Submit (async) → poll / wait → download. Long GPU jobs without blocking chat. |
 | **Gallery** | Trellis runs only, newest first, with label and time. No inlined textures. Pictures come from `trellis_render_preview`. |
 | **Usage** | Count of those runs, real GPU seconds from ComfyUI timestamps, newest task. Not a credit balance. |
-| **MCP tools** | 11 `trellis_*` tools (health, start, image_to_3d, task_status, wait, download, render, texturize, remesh, gallery, usage). |
-| **Skill** | `trellis-3d-generation` teaches the agent the pipeline, service-state-first rule, and delivery. |
-| **Desktop integration** | Rendered preview in chat (`MEDIA:`), status bar, gallery panel. |
+| **Quality default** | 1536 resolution, 50 steps per stage, remesh grid 1536, texture size 4096. |
+| **MCP tools** | 12 tools: health, start, image_to_3d, task_status, wait, download, render, texturize, remesh, gallery, usage, open_slicer. |
+| **Skill** | `trellis-3d-generation` is the print procedure the agent follows. |
+| **Desktop** | `desktop/plugin.js` orbits a GLB from `::trellis-model{glb="…" stl="…"}` and shows a status chip. `desktop/plugin.py` is a terminal status check only. |
 
 ## Architecture
 
@@ -63,8 +60,7 @@ Optional legacy front (kept for existing docker-bridge deployments):
   pipelines, delivery, troubleshooting). What the agent reads.
 - **ComfyUI runtime** (`:8188`): the *only* DGX component this plugin needs.
   `Trellis.2` must be installed there (see `INSTALL.md` § DGX).
-- **Desktop plugin** (`desktop/plugin.py` + `desktop/README.md`):
-  status bar, in-chat preview, gallery — mirrors the Meshy desktop integration.
+- **Desktop** (`desktop/plugin.js`, `dashboard/plugin_api.py`): orbit card and status chip. Enable the desktop half under Capabilities → Plugins.
 
 ## Repo layout
 
@@ -74,6 +70,7 @@ hermes-trellis/
 ├── INSTALL.md                   # full install (DGX + Mac + Hermes)
 ├── docker/                          # (optional legacy bridge — kept, not required)
 ├── mcp/
+│   ├── run.sh                       # builds dist/ on first start, then runs the server
 │   ├── print_mesh.py                # trimesh STL, decimate, scale, repair
 │   ├── package.json / tsconfig.json
 │   └── src/
@@ -87,8 +84,14 @@ hermes-trellis/
 │   ├── SKILL.md                    # the skill (frontmatter + pipeline)
 │   └── references/  setup.md · pipelines.md · delivery.md · troubleshooting.md
 ├── desktop/
-│   ├── plugin.py                    # status bar, chat preview, gallery
+│   ├── plugin.js                    # orbit card and status chip
+│   ├── plugin.py                    # terminal status check
 │   └── README.md
+├── dashboard/
+│   ├── manifest.json
+│   └── plugin_api.py                # serves a local GLB to the orbit card
+├── plugin.json                      # Hermes plugin manifest
+├── mcp.json                         # starts mcp/run.sh
 ├── tests/
 │   └── smoke.mjs                     # mock ComfyUI suite (no GPU)
 ```
@@ -123,8 +126,8 @@ npm run typecheck                # optional: strict re-check
 # ~/.hermes/config.yaml
 mcp_servers:
   trellis:
-    command: node
-    args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
+    command: sh
+    args: ["/absolute/path/to/hermes-trellis/mcp/run.sh"]
     env:
       TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"
       TRELLIS_PYTHON: "/absolute/path/to/python"   # trimesh [+ fast-simplification]
@@ -135,7 +138,7 @@ hermes skills install /absolute/path/to/hermes-trellis/skills/trellis-3d-generat
 ```
 
 **4. Use it.** In chat:
-> *"Make a printable STL of this photo at 1024, 10 cm tall, about 20k faces, and show me four solid views."*
+> *"Make a printable STL of this photo, as much detail as possible, 10 cm tall, and show me four solid views."*
 
 The agent: `trellis_health` → `trellis_image_to_3d` on the GPU host →
 `trellis_wait_task` → download the GLB → `trellis_render_preview` (four solid

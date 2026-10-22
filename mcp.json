@@ -3,8 +3,8 @@
   "mcpServers": {
     "trellis": {
       "type": "stdio",
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/mcp/dist/index.js"],
+      "command": "sh",
+      "args": ["${PLUGIN_ROOT}/mcp/run.sh"],
       "cwd": "${PLUGIN_ROOT}",
       "env": {
         "TRELLIS_API_URL": "${TRELLIS_API_URL}",
