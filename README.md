@@ -4,6 +4,8 @@ A **Hermes Agent plugin** that turns one photo into a printable STL. Trellis.2
 runs on a ComfyUI GPU host. The Hermes machine writes a checked binary STL.
 There is no cloud API, no subscription, no rigging, and no animation.
 
+It is not fully proven, and it is not an official Nous release. The 1536 / 50-step graph has not been run as a full generation. This repo is not in the Nous plugin catalog. Install it from this GitHub repository. ComfyUI with Trellis.2 must already be running on the GPU.
+
 The GPU host runs Trellis.2 and the four solid views. The Hermes machine
 runs the agent, the MCP server, and trimesh. ComfyUI writes a GLB. `trellis_download`
 with `format: "stl"` converts that GLB on the Hermes machine and checks
