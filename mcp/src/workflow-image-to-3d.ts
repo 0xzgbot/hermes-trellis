@@ -1,33 +1,36 @@
 /**
- * workflow-image-to-3d.ts — the proven Trellis.2 image→3D ComfyUI graph.
+ * workflow-image-to-3d.ts — the PROVEN Trellis.2 image→3D ComfyUI graph.
  *
- * This is the proven pipeline (reconstructed here as a ComfyUI node graph) that
- * runs the local Trellis.2 (4B) model on the
- * DGX Spark INSIDE standard ComfyUI (the Trellis-2 node classes: Trellis2*,
- * VaeDecode*Trellis, EmptyTrellis2LatentStructure, VoxelToMesh). It turns one
- * conditioning image into a fully-textured 3D asset:
+ * This graph is the exact node wiring that the live ComfyUI 0.42 + Trellis-2 node
+ * pack on the DGX Spark accepts (captured from a successful /history run). It was
+ * regenerated from the server itself rather than hand-assumed, because the node
+ * input names and model filenames differ from the naive guesses:
  *
- *   load image → remove background → crop to mask
- *   → Trellis2 conditioning (DINOv3 CLIP-vision, pos/neg)
- *   → SPARSE STRUCTURE: KSampler → VaeDecodeStructureTrellis2 (32³ voxels)
- *       → VoxelToMesh (coarse mesh)
- *   → SHAPE (SLAT): Trellis2ShapeStage → KSampler → VaeDecodeShapeTrellis (256)
- *   → HIGH-RES UP-SAMPLE: Trellis2UpsampleStage (512/1024/1536) → KSampler
- *       → VaeDecodeShapeTrellis (final high-res mesh)
- *   → PBR TEXTURE: Trellis2TextureStage (image-conditioned) → KSampler
- *       → VaeDecodeTextureTrellis (textured mesh: base color + roughness)
- *   → CAPTURE: SaveGLB (raw geometry) + SaveGLB (final textured, PBR)
- *       + RenderMesh → SaveImage (preview PNG).
+ *   - KSampler uses `sampler_name` + `latent_image` (not `sampler`/`latent`)
+ *   - SaveGLB / SaveImage use `filename_prefix` (not `filename`)
+ *   - Trellis2Conditioning uses `clip_vision_model` (not `clip`)
+ *   - RemoveBackground uses `bg_removal_model` (not `model`)
+ *   - EmptyTrellis2LatentStructure uses `batch_size` (not `batch`)
+ *   - ImageCropToMask uses `images`/`masks`/`pad_factor` (not `image`/`pad`)
+ *   - model files: trellis_2_int8_convrot / trellis_2_shape_vae_bf16 /
+ *     trellis_2_texture_vae_bf16 / dino_v3_L_naf_fp32 / birefnet
+ *
+ * Flow: load image -> background removal (BiRefNet) -> crop to mask
+ *   -> Trellis2 conditioning (DINOv3 CLIP-vision, pos/neg)
+ *   -> SPARSE STRUCTURE (KSampler -> VaeDecodeStructureTrellis2 -> VoxelToMesh)
+ *   -> SHAPE (Trellis2ShapeStage -> KSampler -> VaeDecodeShapeTrellis)
+ *   -> HIGH-RES UPSAMPLE (Trellis2UpsampleStage -> KSampler -> VaeDecodeShapeTrellis)
+ *   -> PBR TEXTURE (Trellis2TextureStage -> KSampler -> VaeDecodeTextureTrellis
+ *        -> BakeTextureFromVoxel -> ApplyTextureToMesh)
+ *   -> CAPTURE: SaveGLB (raw) + SaveGLB (final textured) + SaveGLB (painted)
  *
  * Placeholders (substituted by `fillImageTo3DWorkflow` at submit time):
- *   {{CONDITIONING_IMAGE}}  -> the server-side filename of the uploaded
- *                                    conditioning image (from ComfyUI /upload/image).
- *   {{RESOLUTION}}           -> the target 3D resolution bucket (512/1024/1536).
- *   {{SEED:n}}                   -> seed + n (each diffusion stage is given a
- *                                    distinct, deterministic seed for reproducibility).
+ *   {{CONDITIONING_IMAGE}} -> the server-side filename of the uploaded image
+ *   {{RESOLUTION}}         -> the target 3D resolution bucket (512/1024/1536)
+ *   {{SEED:n}}             -> seed + n (each diffusion stage gets a distinct seed)
  *
- * `CAPTURE_NODES` is the `output` list sent to `POST /api/prompt`: the node ids whose
- * products we want ComfyUI to retain (and later fetch via /history + /view).
+ * `CAPTURE_NODES` is the `output` list sent to `POST /api/prompt`: the node ids
+ * whose products ComfyUI retains (and we later fetch via /history + /view).
  */
 
 export type WorkflowInputs = Record<string, unknown>;
@@ -38,61 +41,81 @@ export interface WorkflowNode {
 /** A ComfyUI workflow graph: node-id -> node (class_type + wired inputs). */
 export type ComfyWorkflow = Record<string, WorkflowNode>;
 
-/** The proven Trellis.2 image→3D pipeline as a ComfyUI node graph (see the file header for the flow). */
+/** The proven Trellis.2 image→3D pipeline as a ComfyUI node graph (regenerated from the live server). */
 export const IMAGE_TO_3D_WORKFLOW: ComfyWorkflow = {
-  // --- Load the conditioning image + prepare it (background removed, cropped) ---
-  load_img: { class_type: "LoadImage", inputs: { image: "{{CONDITIONING_IMAGE}}" } },
-  bg_model: { class_type: "LoadBackgroundRemovalModel", inputs: { bg_removal_name: "RMBG-2.0" } },
-  remove_bg: { class_type: "RemoveBackground", inputs: { model: ["bg_model", 0], image: ["load_img", 0] } },
-  crop: { class_type: "ImageCropToMask", inputs: { width: "{{RESOLUTION}}", height: "{{RESOLUTION}}", pad: 0.1, image: ["remove_bg", 0] } },
-
-  // --- Trellis2 conditioning: encode the (cropped) image with a DINOv3 CLIP-vision model ---
-  clip_vision: { class_type: "CLIPVisionLoader", inputs: { clip_name: "dinov3_vitl" } },
-  trellis_cond: { class_type: "Trellis2Conditioning", inputs: { clip: ["clip_vision", 0], image: ["crop", 0] } },
-
-  // --- Model / VAE loaders (the Trellis.2 UNet + the structure / shape / texture VAEs) ---
-  unet: { class_type: "UNETLoader", inputs: { unet_name: "trellis2_4B.safetensors" } },
-  struct_vae: { class_type: "VAELoader", inputs: { vae_name: "trellis2_structure_vae.safetensors" } },
-  shape_vae: { class_type: "VAELoader", inputs: { vae_name: "trellis2_shape_vae.safetensors" } },
-  texture_vae: { class_type: "VAELoader", inputs: { vae_name: "trellis2_texture_vae.safetensors" } },
-
-  // --- STAGE 1: SPARSE STRUCTURE — sample a 32³ voxel occupancy field from noise ---
-  struct_latent: { class_type: "EmptyTrellis2LatentStructure", inputs: { resolution: 32, batch: 1 } },
-  struct_sample: { class_type: "KSampler", inputs: { model: ["unet", 0], seed: "{{SEED:0}}", steps: 20, cfg: 2.5, sampler: "euler", scheduler: "normal", positive: ["trellis_cond", 0], negative: ["trellis_cond", 1], latent: ["struct_latent", 0], denoise: 1.0 } },
-  struct_decode: { class_type: "VaeDecodeStructureTrellis2", inputs: { vae: ["struct_vae", 0], samples: ["struct_sample", 0], resolution: 32 } },
-  voxel_mesh: { class_type: "VoxelToMesh", inputs: { voxel: ["struct_decode", 0], resolution: 32 } },
-
-  // --- STAGE 2: SHAPE (SLAT) — refine the coarse mesh to a 256³ structured-latent shape ---
-  shape_stage: { class_type: "Trellis2ShapeStage", inputs: { mesh: ["voxel_mesh", 0], resolution: 256 } },
-  shape_sample: { class_type: "KSampler", inputs: { model: ["unet", 0], seed: "{{SEED:1}}", steps: 30, cfg: 2.5, sampler: "euler", scheduler: "normal", positive: ["trellis_cond", 0], negative: ["trellis_cond", 1], latent: ["shape_stage", 0], denoise: 1.0 } },
-  shape_decode: { class_type: "VaeDecodeShapeTrellis", inputs: { vae: ["shape_vae", 0], samples: ["shape_sample", 0], resolution: 256 } },
-
-  // --- STAGE 3: HIGH-RES UP-SAMPLE — raise the mesh to the target 512/1024/1536 resolution ---
-  upsample: { class_type: "Trellis2UpsampleStage", inputs: { mesh: ["shape_decode", 0], resolution: "{{RESOLUTION}}" } },
-  upsample_sample: { class_type: "KSampler", inputs: { model: ["unet", 0], seed: "{{SEED:2}}", steps: 30, cfg: 2.0, sampler: "euler", scheduler: "normal", positive: ["trellis_cond", 0], negative: ["trellis_cond", 1], latent: ["upsample", 0], denoise: 0.6 } },
-  upsample_decode: { class_type: "VaeDecodeShapeTrellis", inputs: { vae: ["shape_vae", 0], samples: ["upsample_sample", 0], resolution: "{{RESOLUTION}}" } },
-
-  // --- STAGE 4: PBR TEXTURE — paint base color / roughness from the reference image ---
-  texture_stage: { class_type: "Trellis2TextureStage", inputs: { mesh: ["upsample_decode", 0], image: ["crop", 0], resolution: "{{RESOLUTION}}" } },
-  texture_sample: { class_type: "KSampler", inputs: { model: ["unet", 0], seed: "{{SEED:3}}", steps: 25, cfg: 2.0, sampler: "euler", scheduler: "normal", positive: ["trellis_cond", 0], negative: ["trellis_cond", 1], latent: ["texture_stage", 0], denoise: 0.5 } },
-  texture_decode: { class_type: "VaeDecodeTextureTrellis", inputs: { vae: ["texture_vae", 0], samples: ["texture_sample", 0], resolution: "{{RESOLUTION}}" } },
-
-  // --- CAPTURE: save the raw (geometry-only) + the final (textured, PBR) GLBs + a preview render ---
-  save_raw_glb: { class_type: "SaveGLB", inputs: { mesh: ["shape_decode", 0], filename: "trellis_raw" } },
-  save_final_glb: { class_type: "SaveGLB", inputs: { mesh: ["texture_decode", 0], texture: true, filename: "trellis_final" } },
-  render_mesh: { class_type: "RenderMesh", inputs: { mesh: ["texture_decode", 0], resolution: 512, views: 1 } },
-  save_render: { class_type: "SaveImage", inputs: { image: ["render_mesh", 0], filename: "trellis_render" } },
+  "91": { class_type: "Trellis2ShapeStage", inputs: { "positive": ["314", 0], "negative": ["315", 0], "voxel": ["119", 0] } },
+  "207": { class_type: "PreviewImage", inputs: { "images": ["147", 1] } },
+  "208": { class_type: "PreviewImage", inputs: { "images": ["147", 2] } },
+  "164": { class_type: "PreviewImage", inputs: { "images": ["147", 0] } },
+  "118": { class_type: "VAELoader", inputs: { "vae_name": "trellis_2_texture_vae_bf16.safetensors" } },
+  "93": { class_type: "VaeDecodeTextureTrellis", inputs: { "samples": ["12", 0], "vae": ["118", 0], "shape_subdivides": ["92", 1] } },
+  "15": { class_type: "CLIPVisionLoader", inputs: { "clip_name": "dino_v3_L_naf_fp32.safetensors" } },
+  "202": { class_type: "GetMeshInfo", inputs: { "mesh": ["92", 0] } },
+  "261": { class_type: "RenderUVAtlas", inputs: { "mesh": ["196", 0], "resolution": "{{RESOLUTION}}" } },
+  "262": { class_type: "PreviewImage", inputs: { "images": ["261", 0] } },
+  "12": { class_type: "KSampler", inputs: { "model": ["318", 0], "seed": "{{SEED:1}}", "steps": 12, "cfg": 1.0, "sampler_name": "euler", "scheduler": "normal", "positive": ["98", 0], "negative": ["98", 1], "latent_image": ["98", 2], "denoise": 1.0 } },
+  "210": { class_type: "ApplyTextureToMesh", inputs: { "mesh": ["196", 0], "base_color": ["164", 0], "metallic": ["207", 0], "roughness": ["208", 0], "occlusion": ["235", 0], "normal_map": ["226", 0] } },
+  "147": { class_type: "BakeTextureFromVoxel", inputs: { "mesh": ["196", 0], "voxel_colors": ["93", 0], "texture_size": ["288", 0], "reference_mesh": ["92", 0] } },
+  "288": { class_type: "PrimitiveInt", inputs: { "value": 4096 } },
+  "238": { class_type: "MeshSmoothNormals", inputs: { "mesh": ["186", 0], "crease_angle": 180.0 } },
+  "18": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 20, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["91", 0], "negative": ["91", 1], "latent_image": ["91", 2], "denoise": 1.0 } },
+  "252": { class_type: "PaintMesh", inputs: { "mesh": ["238", 0], "voxel_colors": ["93", 0] } },
+  "279": { class_type: "CFGOverride", inputs: { "model": ["318", 0], "cfg": 1.0, "start_percent": 0.769, "end_percent": 1.0 } },
+  "126": { class_type: "RescaleCFG", inputs: { "model": ["279", 0], "multiplier": 0.5 } },
+  "192": { class_type: "RemoveBackground", inputs: { "bg_removal_model": ["193", 0], "image": ["122", 0] } },
+  "248": { class_type: "ComfySwitchNode", inputs: { "switch": true, "on_false": ["122", 1], "on_true": ["192", 0] } },
+  "303": { class_type: "MaskPreview", inputs: { "mask": ["248", 0] } },
+  "302": { class_type: "PreviewImage", inputs: { "images": ["312", 0] } },
+  "119": { class_type: "VaeDecodeStructureTrellis2", inputs: { "samples": ["3", 0], "vae": ["117", 0], "resolution": "32" } },
+  "4": { class_type: "VoxelToMesh", inputs: { "voxel": ["119", 0], "algorithm": "basic", "threshold": 0.6 } },
+  "247": { class_type: "MeshToFile3D", inputs: { "mesh": ["4", 0] } },
+  "3": { class_type: "KSampler", inputs: { "model": ["108", 0], "seed": "{{SEED:14}}", "steps": 12, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["314", 0], "negative": ["315", 0], "latent_image": ["87", 0], "denoise": 1.0 } },
+  "125": { class_type: "RescaleCFG", inputs: { "model": ["199", 0], "multiplier": 0.7 } },
+  "199": { class_type: "CFGOverride", inputs: { "model": ["318", 0], "cfg": 1.0, "start_percent": 0.667, "end_percent": 1.0 } },
+  "108": { class_type: "ModelSamplingSD3", inputs: { "model": ["125", 0], "shift": 5.0 } },
+  "94": { class_type: "Trellis2UpsampleStage", inputs: { "positive": ["91", 0], "negative": ["91", 1], "shape_latent": ["18", 0], "vae": ["117", 0], "target_resolution": "{{RESOLUTION}}" } },
+  "233": { class_type: "BakeAmbientOcclusion", inputs: { "low_poly": ["196", 0], "high_poly": ["241", 0], "resolution": 1024, "samples": 64, "max_distance": 0.71, "strength": 1.0, "bias": 0.01 } },
+  "224": { class_type: "BakeNormalMapFromMesh", inputs: { "low_poly": ["196", 0], "high_poly": ["241", 0], "resolution": 2048, "cage_distance": 0.05, "ignore_backfaces": true } },
+  "226": { class_type: "PreviewImage", inputs: { "images": ["224", 0] } },
+  "235": { class_type: "PreviewImage", inputs: { "images": ["233", 0] } },
+  "241": { class_type: "RemeshMesh", inputs: { "mesh": ["202", 0], "resolution": 768, "sign_mode": "solid", "sign_mode.fill": 20.0, "sign_mode.qef": false, "band": 1.0, "project_back": 0.0, "fix_poles": false, "smooth_iters": 20, "drop_small_components": 0.01, "precluster_max_verts": 20000000 } },
+  "186": { class_type: "DecimateMesh", inputs: { "mesh": ["241", 0], "target_face_count": 700000, "placement_mode": "midpoint" } },
+  "196": { class_type: "UnwrapMesh", inputs: { "mesh": ["238", 0], "segmenter": "pec", "resolution": ["288", 0], "padding": 1, "weld_distance": 0.0002 } },
+  "117": { class_type: "VAELoader", inputs: { "vae_name": "trellis_2_shape_vae_bf16.safetensors" } },
+  "55": { class_type: "LoadMoGeModel", inputs: { "model_name": "moge_2_vitl_normal_fp16.safetensors" } },
+  "193": { class_type: "LoadBackgroundRemovalModel", inputs: { "bg_removal_name": "birefnet.safetensors" } },
+  "56": { class_type: "MoGeInference", inputs: { "moge_model": ["55", 0], "image": ["302", 0], "resolution_level": 9, "fov_x_degrees": 0.0, "batch_size": 4, "force_projection": true, "apply_mask": true, "refine_steps": 3 } },
+  "242": { class_type: "MoGeGeometryToFOV", inputs: { "moge_geometry": ["56", 0], "axis": "horizontal", "unit": "degrees" } },
+  "299": { class_type: "Trellis2Conditioning", inputs: { "clip_vision_model": ["15", 0], "image": ["302", 0] } },
+  "298": { class_type: "Pixal3DConditioning", inputs: { "clip_vision_model": ["15", 0], "image": ["302", 0], "camera_angle_x": ["242", 0] } },
+  "92": { class_type: "VaeDecodeShapeTrellis", inputs: { "samples": ["23", 0], "vae": ["117", 0] } },
+  "40": { class_type: "UNETLoader", inputs: { "unet_name": "trellis_2_int8_convrot.safetensors", "weight_dtype": "default" } },
+  "98": { class_type: "Trellis2TextureStage", inputs: { "positive": ["94", 0], "negative": ["94", 1], "shape_latent": ["23", 0] } },
+  "282": { class_type: "MeshToFile3D", inputs: { "mesh": ["252", 0] } },
+  "260": { class_type: "MeshSmoothNormals", inputs: { "mesh": ["210", 0], "crease_angle": 180.0 } },
+  "285": { class_type: "MeshToFile3D", inputs: { "mesh": ["260", 0] } },
+  "87": { class_type: "EmptyTrellis2LatentStructure", inputs: { "batch_size": 1 } },
+  "23": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 12, "cfg": 7.5, "sampler_name": "euler", "scheduler": "simple", "positive": ["94", 0], "negative": ["94", 1], "latent_image": ["94", 2], "denoise": 1.0 } },
+  "122": { class_type: "LoadImage", inputs: { "image": "{{CONDITIONING_IMAGE}}" } },
+  "312": { class_type: "ImageCropToMask", inputs: { "images": ["122", 0], "masks": ["303", 0], "width": "{{RESOLUTION}}", "height": "{{RESOLUTION}}", "pad_factor": 1.1, "grow_mask": 0, "background": "#000000" } },
+  "314": { class_type: "ComfySwitchNode", inputs: { "switch": ["316", 0], "on_false": ["298", 0], "on_true": ["299", 0] } },
+  "315": { class_type: "ComfySwitchNode", inputs: { "switch": ["316", 0], "on_false": ["298", 1], "on_true": ["299", 1] } },
+  "316": { class_type: "PrimitiveBoolean", inputs: { "value": true } },
+  "318": { class_type: "ComfySwitchNode", inputs: { "switch": ["316", 0], "on_false": ["319", 0], "on_true": ["40", 0] } },
+  "319": { class_type: "UNETLoader", inputs: { "unet_name": "pixal3d_int8_convrot.safetensors", "weight_dtype": "default" } },
+  "save_raw_glb": { class_type: "SaveGLB", inputs: { "mesh": ["247", 0], "filename_prefix": "3d/trellis2_raw_structure" } },
+  "save_final_glb": { class_type: "SaveGLB", inputs: { "mesh": ["285", 0], "filename_prefix": "3d/trellis2_textured" } },
+  "save_painted_glb": { class_type: "SaveGLB", inputs: { "mesh": ["282", 0], "filename_prefix": "3d/trellis2_painted" } },
 };
 
 /** The node ids whose products we want ComfyUI to retain + serve (the `output` list). */
-export const CAPTURE_NODES = ["save_raw_glb", "save_final_glb", "save_render"];
+export const CAPTURE_NODES = ["save_raw_glb", "save_final_glb", "save_painted_glb"];
 
-/** What `fillImageTo3DWorkflow` substitutes into the template. */
 export interface FillImageTo3DParams {
   /** The (server-side) filename of the uploaded conditioning image. */
   image: string;
   /** Target 3D resolution bucket: 512 | 1024 | 1536. */
-  resolution: 512 | 1024 | 1536 | number;
+  resolution: number;
   /** Base RNG seed; each diffusion stage derives seed + n deterministically. */
   seed: number;
 }

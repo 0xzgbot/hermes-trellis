@@ -557,8 +557,13 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
     const fmt = (format || "glb").toLowerCase().replace(/^\./, "");
     const entry = await this.fetchHistoryEntry(id);
     const flat = flattenOutputs(entry);
-    let pick = flat.find((fo) => fo.ref.filename.endsWith(`.${fmt}`));
-    if (!pick) pick = flat.find((fo) => fo.ref.filename.endsWith(".glb"));
+    const ofFmt = flat.filter((fo) => fo.ref.filename.toLowerCase().endsWith(`.${fmt}`));
+    // Prefer the FINAL/textured asset over the raw/painted intermediates.
+    let pick = ofFmt.find((fo) => /final|textured/i.test(fo.nodeId) || /final|textured/i.test(fo.ref.filename));
+    if (!pick) pick = ofFmt[ofFmt.length - 1];
+    if (!pick) pick = flat.find((fo) => fo.ref.filename.toLowerCase().endsWith(`.${fmt}`));
+    if (!pick) pick = flat.filter((fo) => fo.ref.filename.toLowerCase().endsWith(".glb")).pop();
+    if (!pick) pick = flat.find((fo) => fo.ref.filename.toLowerCase().endsWith(".glb"));
     if (!pick) {
       throw new BridgeError(`No output found in ComfyUI history for task ${id} (format=${fmt}); the run may have failed.`, 404);
     }
