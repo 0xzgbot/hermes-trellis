@@ -1,0 +1,13 @@
+name: no personal data
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject home paths, the tailnet address, emails, and tokens
+        run: sh scripts/check-no-personal.sh

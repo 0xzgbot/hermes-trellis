@@ -1,0 +1,3 @@
+#!/bin/sh
+root=$(git rev-parse --show-toplevel)
+exec sh "$root/scripts/check-no-personal.sh" --cached
