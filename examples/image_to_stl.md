@@ -17,9 +17,10 @@ slicer or the foundry.
 3. trellis_image_to_3d          # submit: image, resolution=1024, seed,
                                         #   label="a bison" -> task_id
 4. trellis_wait_task(task_id)   # block until completed
-5. trellis_remesh_decimate        # face_budget=20000 (print-sized)
-6. trellis_download(format="stl",
-                         dest="~/Desktop/bison.stl")
+5. **Local GLB → STL conversion** (no GPU): `trimesh.load(glb, force="mesh")`
+   → optional `simplify_quadric_decimation(face_count=20000)` →
+   `export(file_type="stl")`; verify `size == 84 + 50·face_count`.
+6. trellis_download(format="glb", dest="~/Desktop/bison.glb")  # server's only export
 7. trellis_render_preview(mode="clay", nviews=8)
 8. MEDIA: .../clay_00.png        # shown inline in chat
 ```

@@ -9,13 +9,15 @@ the MCP server) and reachability to the DGX.
 1. **ComfyUI 0.42 runtime on the DGX** — the standard ComfyUI at
    `http://<DGX>:8188` with the **Trellis-2 node classes** installed:
    `Trellis2Conditioning · Trellis2ShapeStage · Trellis2TextureStage ·
-   Trellis2UpsampleStage · VaeDecodeStructureTrellis2 · VaeDecodeShapeTrellis
-   · VaeDecodeTextureTrellis · EmptyTrellis2LatentStructure · VoxelToMesh ·
+   Trellis2UpsampleStage · VaeDecodeStructureTrellis2 · VaeDecodeShapeTrellis ·
+   VaeDecodeTextureTrellis · EmptyTrellis2LatentStructure · VoxelToMesh ·
    UNETLoader · VAELoader · KSampler · RenderMesh · SaveGLB · SaveImage`.
-   The `microsoft/TRELLIS.2-4B` weights (and `dino_v3_vit_l` for background
-   removal) must be in the HF cache. This is the **only DGX component the
-   plugin needs** — it speaks ComfyUI's standard API and manages nothing
-   itself.
+   The weights are **local safetensors** the graph loads by filename —
+   `trellis_2_int8_convrot.safetensors` (UNet), `trellis_2_shape_vae_bf16.safetensors`,
+   `trellis_2_texture_vae_bf16.safetensors`, `dino_v3_L_naf_fp32.safetensors`
+   (CLIP-vision), `birefnet.safetensors` (background removal). This is the **only
+   DGX component the plugin needs** — it speaks ComfyUI's standard API and
+   manages nothing itself.
 
 2. **(Optional) the legacy REST bridge on the DGX** — a FastAPI app
    (`docker/trellis-api`, port **7861**) wrapping the same pipeline with
@@ -31,13 +33,13 @@ the MCP server) and reachability to the DGX.
 ## DGX prerequisites
 
 - **ComfyUI 0.42** with the Trellis-2 node classes (see Components §1).
+- **The weights present** as local safetensors in the ComfyUI model dirs (see
+  Components §1) — the graph loads them by filename, so no HF token or download
+  step is needed for this runtime.
 - **A `.env`** with:
-  - `HF_TOKEN` — a Hugging Face token that has **access granted** to the
-    gated models the pipeline needs (`facebook/dinov3` and `briaai/RMBG-2.0`);
-    request access on those model pages (approval can take a while).
   - `UID` / `GID` — your host user/group (for sane file ownership).
-- **The model weights cached** — `microsoft/TRELLIS.2-4B` in the HF cache
-  (`HF_HOME`). First run downloads; ensure enough free disk (tens of GB).
+  - (Only if you run the legacy bridge / Gradio app) `HF_TOKEN` for any
+    HF-downloaded weights — the ComfyUI path above does not need it.
 
 ## Starting / stopping the service
 
@@ -74,8 +76,19 @@ documentation; the plugin does not install or manage ComfyUI itself.
 
 Once the MCP server is built (`mcp/dist/index.js`) and the skill is in place:
 
-- Add an MCP server entry to `~/.hermes/config.yaml` pointing at the built
-  server (command = `node`, args = the built `index.js`), with the env above.
+- Add an MCP server entry to **`~/.hermes/config.yaml`** (the *main* profile
+  config) pointing at the built server (command = `node`, args = the built
+  `index.js`), with the env above.
+
+  > **Put it in the MAIN profile config, not a per-profile one.** The agent and
+  > the desktop app load `~/.hermes/config.yaml`; an entry written only under
+  > `~/.hermes/profiles/<name>/config.yaml` is invisible to them, so the
+  > `trellis_*` tools silently never register (the failure mode this repo hit).
+  > Prefer `hermes config set mcp_servers.trellis.<field> <value> --force` —
+  > direct writes to `config.yaml` are refused by the guard.
+- **Restart the agent** after editing the config: MCP servers are connected at
+  startup, so a running agent keeps its old tool set. Kill the gateway agent
+  (the desktop app respawns it) rather than only reloading the UI.
 - Install/load the skill (`trellis-3d-generation`) so the agent knows the
   pipeline and the "service state first" rule.
 

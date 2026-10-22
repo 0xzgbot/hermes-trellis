@@ -26,7 +26,8 @@ stopped so the GPU is free for TensorFold/other LLM work). So:
    - Call **`trellis_start`** (optionally with `wait_seconds`). Surface the
      result (`up`, `model_loaded`). If it does not come up, read
      [Troubleshooting](references/troubleshooting.md) and report the likely
-     cause (e.g. `.env` `HF_TOKEN` missing, weights not downloaded).
+     cause (e.g. a missing local weight file, or a node input name the server
+     rejects) and read [Troubleshooting](references/troubleshooting.md).
 3. If it reports **busy / a generation in flight**, say so and wait (do not
    submit a competing job).
 
@@ -53,10 +54,17 @@ texturing; a model already exported needs no re-export.
 - **No text-to-3D and no multi-view** in this model (unlike the cloud service this
   mirrors). If the user only has a description, help them pick/generate a good
   conditioning image first (e.g. via an image tool), then run it.
-- **PBR texturing / re-texturing** (base color, roughness, metallic, opacity).
-- **Decimation + remesh** to a face/vertex budget (for printability/size).
-- **Export**: **GLB (first-class, full PBR)**, **STL** (watertight solid — casting/
-  printing), OBJ, FBX, USDZ.
+- **PBR texturing** is built into the image→3D pipeline (the texture stage bakes
+  base color / metallic / roughness). `trellis_texturize` re-runs the same
+  generation job — it is **not** a separate texture-only pass.
+- **Export**: the server emits **GLB only** (`SaveGLB`) — full PBR, the native
+  output. This ComfyUI has **no STL/OBJ/FBX/USDZ nodes**, so
+  `trellis_download(format="stl")` falls back to the GLB. For **STL**
+  (print/cast), convert the GLB **locally** — see
+  [Pipelines](references/pipelines.md) → "GLB → printable binary STL".
+- **Decimation / remesh**: `trellis_remesh_decimate` targets the **legacy
+  bridge** backend only (`POST /tasks/:id/remesh`) — it is **not available** on
+  the default `comfyui` backend. Decimate locally with trimesh instead.
 - **Render preview** under an HDRI (modes incl. clay/base-color/forest/sunset/
   courtyard), frames or a turntable.
 - **Gallery** of all models made + **usage** (local "credits": how many generated,
@@ -70,8 +78,10 @@ texturing; a model already exported needs no re-export.
    `task_id`.
 3. **`trellis_wait_task`** (or `trellis_task_status`) until it completes; read the
    error if it fails and act on [Troubleshooting](references/troubleshooting.md).
-4. **`trellis_download`** to the path the user wants, in the requested format
-   (**STL** for print/cast, **GLB** for keeping full PBR, etc.).
+4. **`trellis_download`** the GLB to the path the user wants. If they asked for
+   **STL** (print/cast), convert the GLB **locally** (Pipelines → "GLB → printable
+   binary STL") — the server has no STL exporter, so `format: "stl"` falls back to
+   the GLB.
 5. (Optional) **`trellis_render_preview`** to get a picture, and show it to the user
    in chat (a `MEDIA:` image) — a missing preview does not block delivery.
 6. Report: file path(s), format, size, and that it's in the gallery. Mention GPU time

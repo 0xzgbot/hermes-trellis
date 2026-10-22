@@ -18,6 +18,32 @@ sequence.
 
 Flow: submit → `trellis_wait_task` (or `trellis_task_status`) until done → `trellis_download`.
 
+### The graph the server expects (do not guess node names)
+
+The shipped template (`mcp/src/workflow-image-to-3d.ts`) is **regenerated from a
+proven `/history` run**, because the live ComfyUI 0.42 + Trellis-2 node pack uses
+different input names and model filenames than the naive assumptions:
+
+| Naive guess | What the server wants |
+|---|---|
+| `sampler` / `latent` | `sampler_name` / `latent_image` (KSampler) |
+| `filename` | `filename_prefix` (SaveGLB / SaveImage) |
+| `clip` | `clip_vision_model` (Trellis2Conditioning) |
+| `model` | `bg_removal_model` (RemoveBackground) |
+| `batch` | `batch_size` (EmptyTrellis2LatentStructure) |
+| `image` / `pad` | `images` / `masks` / `pad_factor` (ImageCropToMask) |
+
+Model files (loaded by filename from the DGX ComfyUI dirs, **no HF token**):
+`trellis_2_int8_convrot.safetensors` (UNet), `trellis_2_shape_vae_bf16.safetensors`,
+`trellis_2_texture_vae_bf16.safetensors`, `dino_v3_L_naf_fp32.safetensors` (CLIP-vision),
+`birefnet.safetensors` (background removal), plus `moge_2_vitl_normal_fp16` and
+`pixal3d_int8_convrot` for the conditioning paths.
+
+**If you ever hand-build a graph, pull each class's exact inputs from
+`GET /object_info`** rather than assuming — a wrong input name yields
+`400 {"error":{"type":"prompt_outputs_failed_validation"}}`, which looks like a
+body bug but is a schema mismatch.
+
 ## PBR texturing / re-texturing
 
 `trellis_texturize` — generate/refresh PBR textures (base color, roughness,
@@ -27,27 +53,56 @@ wait on, then `trellis_download` a textured export.
 
 ## Decimation + remesh
 
-`trellis_remesh_decimate` — cut a produced model to a **face budget**
-(decimation) and/or **remesh** it (band / project) to clean up topology —
-typical when preparing for 3D printing or to reduce file size. Pass a
-`face_budget` (target face count), optional `remesh` + `remesh_band` /
-`remesh_project`, and a `dest`. It returns the rewritten file path and
-before/after face counts. Pair with `format: stl` for print-ready output.
+`trellis_remesh_decimate` targets the **legacy bridge** backend only
+(`POST /tasks/:id/remesh`) — on the default **`comfyui`** backend there is no such
+endpoint, so the call fails. To prepare a model for printing/size, decimate
+**locally** (see "GLB → printable binary STL" below).
 
 ## Choosing an export format
 
-`trellis_download` with `format` (one task can produce several):
+**The server emits GLB only** (`SaveGLB`, full PBR — the native output). This
+ComfyUI has **no STL/OBJ/FBX/USDZ nodes**: `trellis_download(format=...)` can only
+return GLB here, and any other `format` falls back to the GLB. So:
 
-| Format | When to use it |
+| Format | How to get it |
 |---|---|
-| **GLB** (first-class) | Keep full PBR (all maps, metallic/roughness/opacity). Default for viewing/animation/USD pipelines. |
-| **STL** | 3D printing / casting / CNC — a plain watertight solid (geometry, no PBR). The "image→STL" path. |
-| **OBJ** | Broad interchange (plus a material file where relevant). |
-| **FBX** | Game-engine / DCC pipelines that expect FBX. |
-| **USDZ** | AR / Apple-ecosystem handoff. |
+| **GLB** (first-class) | `trellis_download(format="glb")` — full PBR, native output. |
+| **STL** | Download the GLB, then convert **locally** (recipe below). |
+| OBJ / FBX / USDZ | **Not available** on this runtime — convert the GLB in a DCC/exchange tool if needed. |
 
-If the user said "an STL for my printer/cast," download `format: stl` (and, if
-they care about quality, decimate to a sensible face budget first via
-`trellis_remesh_decimate`). If they want to keep it textured/interactive, GLB.
+If the user said "an STL for my printer/cast," download the GLB and convert it
+locally. If they want to keep it textured/interactive, deliver the GLB as-is.
 When in doubt about quality, note that a rendered preview shows appearance,
 while STL/watertightness should be checked in their slicer/CAD for print.
+
+## GLB → printable binary STL (local trimesh conversion — no GPU)
+
+The generation run emits a **GLB**; a printer wants a **binary STL** (pure
+geometry). Do the conversion **on the Mac**, offline — no Spark round-trip.
+
+Recipe (a venv with `trimesh`, e.g. `/tmp/trev/bin/python`):
+
+```python
+import trimesh, struct
+src, dst = "/path/to/hermes_model.glb", "/path/to/hermes_model.stl"
+m = trimesh.load(src, force="mesh")          # a Scene? concatenate its meshes
+print("faces", len(m.faces), "watertight", m.is_watertight)
+if len(m.faces) > 200_000:                   # optional: decimate to print-friendly
+    m = m.simplify_quadric_decimation(face_count=200_000)
+m.export(dst, file_type="stl")               # trimesh STL writer is BINARY by default
+b = open(dst, "rb").read()
+fc = struct.unpack("<I", b[80:84])[0]        # VERIFY the binary-STL byte math
+assert len(b) == 84 + 50*fc, (len(b), fc)
+print("OK faces", fc, "bytes", len(b), "watertight", m.is_watertight)
+```
+
+Caveats:
+- **Binary-STL layout**: 80-byte header + LE u32 face count + 50 bytes/face ⇒
+  `filesize == 84 + 50·face_count`. trimesh's `stl` writer is binary by default.
+- **`force="mesh"`** collapses a single-mesh `Scene`; for a multi-part asset,
+  iterate `scene.geometry.values()` and `trimesh.util.concatenate`.
+- **Watertight is often `False`** on fresh Trellis output — usually slices fine,
+  but state the flag explicitly rather than calling the mesh clean.
+- **Units/scale**: the mesh lives in ComfyUI's normalized space (observed extent
+  ≈ 0.4–0.5 per axis). The STL inherits those units; the user sets the real size
+  in the slicer (e.g. scale to 10–15 cm). Offer to pre-scale to exact mm.

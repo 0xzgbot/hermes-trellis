@@ -2,7 +2,8 @@
 
 A **Hermes Agent plugin** that drives the local **Trellis.2** model (4B) on a
 **DGX Spark** to turn an **image into a fully-textured 3D model** — and
-export it as **GLB / STL / OBJ / FBX / USDZ**. It is the faithful analogue of the
+**export it as GLB** (the server's native output), with **STL for print/cast**
+produced by a local GLB→STL conversion. It is the faithful analogue of the
 **Meshy** plugin (MCP + Skill + desktop integration: rendered models in
 chat, status bar, gallery) — but it runs **Trellis** (an open, local image→3D
 model) instead of Meshy's proprietary cloud.
@@ -13,14 +14,19 @@ model) instead of Meshy's proprietary cloud.
 > **STL** (print/cast). Swap the model by pointing `TRELLIS_MODEL_ID` at a
 > different image→3D checkpoint that speaks the same pipeline.
 
+> **Export reality check:** the ComfyUI runtime emits **GLB only** (`SaveGLB`).
+> There are **no STL/OBJ/FBX/USDZ nodes** on it, so `trellis_download(format=…)`
+> returns GLB for any format. For **STL**, convert the GLB **locally** (the skill
+> carries the trimesh recipe) — no GPU needed for the conversion.
+
 ## What it gives you
 
 | Feature | Detail |
 |---|---|
 | **Image → 3D** | One conditioning image → a textured 3D asset. The core (Trellis has no text-to-3D / multi-view). |
-| **PBR texturing** | Generate / re-generate base color, roughness, metallic, opacity for a shape. |
-| **Decimation + remesh** | Cut to a face/vertex budget, clean topology (print-ready). |
-| **Export** | **GLB** (full PBR, first-class), **STL** (solid), OBJ, FBX, USDZ. |
+| **PBR texturing** | Baked into image→3D (base color, roughness, metallic). `trellis_texturize` re-runs the generation job. |
+| **Decimation + remesh** | Local (trimesh). `trellis_remesh_decimate` is legacy-bridge-only — not on the default `comfyui` backend. |
+| **Export** | **GLB** (full PBR, first-class — the server's only export). **STL** via local GLB→STL conversion; OBJ/FBX/USDZ are not produced by this runtime. |
 | **HDRI render preview** | Frames / turntable under neutral, clay, base-color, or forest/sunset/courtyard lighting. |
 | **Task mgmt** | Submit (async) → poll / wait → download. Long GPU jobs without blocking chat. |
 | **Gallery** | Every model you've made (thumbnails, labels, timestamps), survives restarts. |
@@ -96,7 +102,10 @@ Full details in [`INSTALL.md`](INSTALL.md). Short version:
 ```bash
 # ComfyUI 0.42.0 with the Trellis-2 node classes (the plugin speaks the standard
 # endpoints below; it does not run or manage ComfyUI itself).
-# Weights: microsoft/TRELLIS.2-4B (+ dinov3_vitl for background removal).
+# Weights (local safetensors the graph loads by filename, no HF token):
+#   trellis_2_int8_convrot.safetensors (UNet)
+#   trellis_2_shape_vae_bf16.safetensors / trellis_2_texture_vae_bf16.safetensors
+#   dino_v3_L_naf_fp32.safetensors (CLIP-vision) / birefnet.safetensors (bg removal)
 # Optional: keep docker/trellis-api as a second runtime on :7861, enabled via
 #           TRELLIS_BACKEND=bridge (legacy; the plugin defaults to comfyui).
 ```
@@ -130,8 +139,8 @@ hermes skills install /absolute/path/to/hermes-trellis/skills/trellis-3d-generat
 > ~/Desktop/bison.stl, and show me a clay render."*
 
 The agent: `trellis_health` → `trellis_start` if down → `trellis_image_to_3d`
-→ `trellis_wait_task` → `trellis_download(stl)` → `trellis_render_preview(clay)`
-→ shows `MEDIA:` preview and the `.stl` path.
+→ `trellis_wait_task` → `trellis_download(glb)` → **local GLB→STL conversion**
+→ `trellis_render_preview(clay)` → shows `MEDIA:` preview and the `.stl` path.
 
 ## Testing
 

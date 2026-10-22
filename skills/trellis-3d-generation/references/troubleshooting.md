@@ -17,7 +17,8 @@ dep/token), not the model.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Load fails / "pipeline load failed" | Missing **HF token** or no **access granted** to gated models (DINOv3, RMBG-2.0); weights not downloaded | On the DGX: put a valid `HF_TOKEN` in `.env` and request access on `facebook/dinov3` + `briaai/RMBG-2.0` model pages. Ensure `microsoft/TRELLIS.2-4B` is in the HF cache (`HF_HOME`). Restart. |
+| Load fails / "pipeline load failed" | The graph references a model file the DGX does not have (e.g. the naive `trellis2_4B.safetensors` / `dinov3_vitl` / `RMBG-2.0`), or a node input name is wrong | Confirm the exact filenames + inputs from `GET /object_info` (see Pipelines → "The graph the server expects"); the proven template is `mcp/src/workflow-image-to-3d.ts`. |
+| `trellis_*` tools not callable at all | The MCP entry is in a **per-profile** config the agent doesn't load, or the agent wasn't restarted after the config change | Put the entry in `~/.hermes/config.yaml` (main profile) and restart the gateway agent (see Setup → "Registering in Hermes"). |
 | Load fails: CUDA/flash-attn/nvdiffrast errors | Wrong CUDA toolkit / missing compiled dep in the env | Use the env the upstream setup built (`setup.sh --flash-attn --nvdiffrast --cumesh --o-voxel --flexgemm`). Match the CUDA version (e.g. 12.9). Rebuild the env. |
 
 ## GPU / resource
@@ -31,10 +32,10 @@ dep/token), not the model.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `415 format ... not available` | Requested a format the task can't produce | Use one of `glb/stl/obj/fbx/usdz`. GLB is always available (the native output). |
+| `415 format ... not available` | Requested a format the task can't produce | This server exports **GLB only** — download `format="glb"`, then convert to STL locally (Pipelines → "GLB → printable binary STL"). |
 | Download fails / task `409 not complete` | Tried to download before the task finished | Wait (`trellis_wait_task`) until `completed`, then download. |
-| `trimesh not installed` (conversion) | Missing conversion dep in the bridge env | `pip install trimesh[easy]` (and Pillow) in the bridge env. |
-| Decimation error / no change | Missing `fast-simplification`, or the trimesh version's API differs | `pip install fast-simplification` (a version matching the Python). The built-in decimation is lower quality. Verify the mesh face count actually dropped. |
+| `trellis_remesh_decimate` 404s | That tool targets the **legacy bridge** backend, not the default `comfyui` one | Decimate locally with trimesh (Pipelines → "GLB → printable binary STL"). |
+| `trimesh not installed` (STL conversion) | Missing conversion dep on the **Mac** (not the bridge env) | `pip install trimesh[easy]` in the Mac venv used for the conversion (e.g. `/tmp/trev`). |
 
 ## Inputs / images
 

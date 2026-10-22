@@ -11,7 +11,7 @@ runnable and verified.
 | Where | Needed | Check |
 |---|---|---|
 | DGX Spark | ComfyUI **0.42** with the **Trellis-2 node classes** installed | `curl -s localhost:8188/system_stats` shows comfyui_version 0.42.0 |
-| DGX Spark | Hugging Face **token** with access to gated models (DINOv3, RMBG-2.0) + `microsoft/TRELLIS.2-4B` in the HF cache | `.env` `HF_TOKEN`; `HF_HOME` |
+| DGX Spark | **Local safetensors** for the Trellis-2 pipeline (`trellis_2_int8_convrot`, `trellis_2_shape_vae_bf16`, `trellis_2_texture_vae_bf16`, `dino_v3_L_naf_fp32`, `birefnet`) | `GET /object_info` lists the node classes; the graph loads weights by filename (no HF token) |
 | Mac | Node **≥ 18** (Hermes wants 22; we need 18+) | `node -v` |
 | Mac | Reachability to the DGX over the tailnet | `ping <DGX-TAILNET-IP>` |
 
@@ -30,7 +30,10 @@ ComfyUI 0.42 is the plugin's runtime; the plugin only calls its API.
 #     (Trellis2Conditioning · Trellis2ShapeStage · Trellis2TextureStage · ... ,
 #      plus VaeDecode*Trellis, EmptyTrellis2LatentStructure, VoxelToMesh,
 #      UNETLoader, VAELoader, KSampler, RenderMesh, SaveGLB/SaveImage).
-#     Load `microsoft/TRELLIS.2-4B` (weights), `dino_v3_vit_l` (RMBG).
+#     Weights are local safetensors loaded by filename (no HF token needed):
+#       trellis_2_int8_convrot.safetensors (UNet)
+#       trellis_2_shape_vae_bf16.safetensors / trellis_2_texture_vae_bf16.safetensors
+#       dino_v3_L_naf_fp32.safetensors (CLIP-vision) / birefnet.safetensors (bg removal)
 #     A `nodes.json` export listing the installed-template versions is the
 #     check: GET /object_info (or /api/object_info).
 

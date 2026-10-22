@@ -61,7 +61,10 @@ is occupying the GPU.
 
 - Downloads land in the output dir (configurable). When the user gives a
   path, write there; otherwise name it `<task_id>.<format>`.
-- GLB carries the full PBR (largest). STL is geometry-only (typically a
-  fraction of the GLB). Report the file size with the path.
+- **`trellis_download` returns GLB** (the server's only export). GLB carries the
+  full PBR and is the largest artifact; a **STL** is produced by converting that
+  GLB **locally** (see Pipelines → "GLB → printable binary STL"), so it is
+  geometry-only and typically a fraction of the GLB. Report the file size with
+  the path.
 - Very large renders/frames are written to disk (not inlined) to keep chat
   light; reference them by path / `MEDIA:`.
