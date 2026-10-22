@@ -105,10 +105,10 @@ function ModelCard({ glb, stl }) {
 
 function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
-  gl.shaderSource(vs, "attribute vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p,1.0); }");
+  gl.shaderSource(vs, "attribute vec3 p; uniform float yaw; uniform float pitch; varying vec3 vN; void main(){ float c=cos(yaw),s=sin(yaw),cp=cos(pitch),sp=sin(pitch); vec3 r=vec3(c*p.x+s*p.z,p.y,-s*p.x+c*p.z); r=vec3(r.x,cp*r.y-sp*r.z,sp*r.y+cp*r.z); vN=r; vec3 e=r+vec3(0.0,-0.05,-2.6); gl_Position=vec4(e.x*3.2,e.y*4.2,e.z*0.15,-e.z); }");
   gl.compileShader(vs);
   const fs = gl.createShader(gl.FRAGMENT_SHADER);
-  gl.shaderSource(fs, "precision mediump float; uniform vec3 color; void main(){ gl_FragColor = vec4(color,1.0); }");
+  gl.shaderSource(fs, "precision mediump float; varying vec3 vN; uniform vec3 color; void main(){ vec3 n=normalize(vN); float light=0.35+0.65*max(0.0,dot(n,normalize(vec3(0.35,0.75,0.55)))); gl_FragColor=vec4(color*light,1.0); }");
   gl.compileShader(fs);
   const prog = gl.createProgram();
   gl.attachShader(prog, vs);
@@ -149,8 +149,8 @@ function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    const mvp = perspective(yaw, pitch);
-    gl.uniformMatrix4fv(gl.getUniformLocation(prog, "mvp"), false, mvp);
+    gl.uniform1f(gl.getUniformLocation(prog, "yaw"), yaw);
+    gl.uniform1f(gl.getUniformLocation(prog, "pitch"), pitch);
     gl.uniform3f(gl.getUniformLocation(prog, "color"), 0.75, 0.78, 0.72);
     const count = mesh.indices ? mesh.indices.length : mesh.positions.length / 3;
     const mode = wireFn() ? gl.LINES : gl.TRIANGLES;
@@ -159,19 +159,6 @@ function drawLoop(gl, canvas, mesh, wireFn, setRaf) {
     setRaf(requestAnimationFrame(frame));
   };
   frame();
-}
-
-function perspective(yaw, pitch) {
-  const c = Math.cos(yaw);
-  const s = Math.sin(yaw);
-  const cp = Math.cos(pitch);
-  const sp = Math.sin(pitch);
-  return new Float32Array([
-    c, sp * s, cp * s, 0,
-    0, cp, -sp, 0,
-    -s, sp * c, cp * c, 0,
-    0, 0, -2.2, 1,
-  ]);
 }
 
 function StatusChip() {
