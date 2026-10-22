@@ -1,52 +1,38 @@
 # Troubleshooting
 
-Symptom → likely cause → fix. Read when something failed or looked
-odd. Most failures are environmental (service down, GPU busy, missing
-dep/token), not the model.
+Read the tool error first. It names the HTTP status or the Python exception.
 
-## Service / reachability
+## Reachability
 
 | Symptom | Cause | Fix |
 |---|---|---|
-|| `trellis_health` says **down / unreachable** (ECONNREFUSED/timeout) | The ComfyUI runtime isn't answering at `TRELLIS_API_URL` — commonly stopped to free the GPU | Call `trellis_start` (confirms the runtime then waits until healthy). Tell the user it needs the GPU. |
-|| Runtime reachable but `model_loaded=false`, job stalls | Model not yet loaded for this workflow — on ComfyUI the Trellis.2 UNet/VAEs are loaded per `/api/prompt` | `trellis_start` with `wait_seconds`; the first workflow of a session is the slow one (weights + DINOv3), later workflows reuse it. |
-|| `404` on `/api/prompt` | Talking to the wrong endpoint (e.g. the ComfyUI *dashboard* or the legacy bridge at :7861) | Set `TRELLIS_API_URL` to the **ComfyUI base** (`:8188`, default) — not the Gradio UI, not the legacy bridge. |
-|| `404` on `/upload/image` | `TRELLIS_BACKEND=bridge` was intended but the DGX never ran the legacy FastAPI | Switch `TRELLIS_BACKEND` to `bridge` (and `TRELLIS_BRIDGE_URL` if not :7861) or rebuild the runtime with the ComfyUI frontend installed. |
+| `trellis_health` is down | ComfyUI is not answering at `TRELLIS_API_URL` | Start ComfyUI on the GPU host. `trellis_start` only repeats the check. |
+| `busy: true` | `/queue` has a running prompt | Wait. Do not submit another generation. |
+| `model_loaded: false` while a job is running or has finished | ComfyUI does not report a resident-model flag | Ignore the flag. Weights load on the first `/api/prompt`. |
+| `404` on `/api/prompt` or `/upload/image` | `TRELLIS_API_URL` is the Gradio UI or the legacy bridge | Point it at ComfyUI `:8188`. |
 
-## Startup failures (`trellis_start` does not come up)
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Load fails / "pipeline load failed" | The graph references a model file the DGX does not have (e.g. the naive `trellis2_4B.safetensors` / `dinov3_vitl` / `RMBG-2.0`), or a node input name is wrong | Confirm the exact filenames + inputs from `GET /object_info` (see Pipelines → "The graph the server expects"); the proven template is `mcp/src/workflow-image-to-3d.ts`. |
-| `trellis_*` tools not callable at all | The MCP entry is in a **per-profile** config the agent doesn't load, or the agent wasn't restarted after the config change | Put the entry in `~/.hermes/config.yaml` (main profile) and restart the gateway agent (see Setup → "Registering in Hermes"). |
-| Load fails: CUDA/flash-attn/nvdiffrast errors | Wrong CUDA toolkit / missing compiled dep in the env | Use the env the upstream setup built (`setup.sh --flash-attn --nvdiffrast --cumesh --o-voxel --flexgemm`). Match the CUDA version (e.g. 12.9). Rebuild the env. |
-
-## GPU / resource
+## Generation
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Job OOM / "out of memory" at high resolution | Not enough unified memory at `1536³` (esp. with LLM serving also resident) | Drop to `1024` or `512` (faster + less memory). If you must go `1536`, reduce concurrent work (stop LLM serving). Use `expandable_segments:True`. |
-| Slow generation / contends with LLM | Trellis and LLM serving (e.g. TensorFold) fighting for the GPU | Coordinate: generate when LLM load is low, or accept longer waits. Mention the contention to the user. Consider generating in batches. |
+| `prompt_outputs_failed_validation` | A node input or weight filename does not match this ComfyUI | Use the shipped graph in `mcp/src/workflow-image-to-3d.ts`. Do not hand-write slot names. |
+| Tools never appear | MCP entry is in a per-profile config, or the agent was not restarted | Main `~/.hermes/config.yaml`, then restart the gateway. |
+| CUDA / flash-attn / nvdiffrast error on the GPU host | The ComfyUI environment is missing a compiled dependency | Fix that environment. The plugin does not rebuild it. |
+| OOM at 1536 | The upsample target is 1536 while other work shares the GPU | Use 1024 or 512. Crop and UV stay at 1024 either way. |
 
-## Conversion / export
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `415 format ... not available` | Requested a format the task can't produce | This server exports **GLB only** — download `format="glb"`, then convert to STL locally (Pipelines → "GLB → printable binary STL"). |
-| Download fails / task `409 not complete` | Tried to download before the task finished | Wait (`trellis_wait_task`) until `completed`, then download. |
-| `trellis_remesh_decimate` 404s | That tool targets the **legacy bridge** backend, not the default `comfyui` one | Decimate locally with trimesh (Pipelines → "GLB → printable binary STL"). |
-| `trimesh not installed` (STL conversion) | Missing conversion dep on the **Mac** (not the bridge env) | `pip install trimesh[easy]` in the Mac venv used for the conversion (e.g. `/tmp/trev`). |
-
-## Inputs / images
+## STL and decimate
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `conditioning image not found` | Local path wrong, or a URL the DGX couldn't fetch | Use an absolute path (on the host), a reachable `http(s)` URL, or a `data:` URL. For local files, they are base64-shipped to the DGX. |
-| Oversized `data:` URL | Huge base64 image | Pre-shrink the image (e.g. ≤1024px, JPEG) before sending. |
+| `Set TRELLIS_PYTHON` / `No module named trimesh` | The MCP process's Python has no trimesh | Install trimesh in that interpreter, or set `TRELLIS_PYTHON` to one that has it. |
+| `fast-simplification` | `face_budget` was set and that package is missing | `pip install fast-simplification` in `TRELLIS_PYTHON`, or omit `face_budget`. |
+| FBX or USDZ refused | Those formats are not implemented | Download GLB or STL. |
+| Watertight is false after `repair: true` | Hole fill did not close the mesh | Say so. The slicer may still accept it. Do not claim it is manifold. |
+| Four view hashes are identical | The turntable did not change the yaw | Treat the preview as failed. Do not describe it as four angles. |
 
-## General
+## Images
 
-- **Read the tool's error text first** — it usually names the cause (HTTP code, exception, path).
-- **Re-run `trellis_health`** after any fix to confirm the state changed before retrying the job.
-- **GPU is the scarce resource** — treat generation as costed, and prefer stopping Trellis when not in use.
-- If two different fixes both seem to work, keep the **simplest** one and note the assumption.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Conditioning image not found | The path is not on the Hermes machine | Pass an absolute path, an `http(s)` URL, or a `data:` URL. The MCP server uploads the bytes to ComfyUI. |
+| Huge data URL | The photo was inlined at full size | Shrink it to about 1024 px before the tool call. |

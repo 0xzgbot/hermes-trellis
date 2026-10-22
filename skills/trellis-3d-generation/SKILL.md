@@ -1,107 +1,45 @@
 ---
 name: trellis-3d-generation
-description: "Turn an image into a fully-textured 3D model (GLB/STL/OBJ/FBX/USDZ) with the local Trellis.2 model on the DGX Spark, driven through standard ComfyUI 0.42 at :8188: generate, PBR-texture, decimate/remesh, HDRI-render a preview, download the file, and track it in the gallery. Use for image->3D and image->STL (casting/printing); there is no text-to-3D here."
+description: "Turn one photo into a printable binary STL with local Trellis.2 on ComfyUI. No cloud API, no subscription, no rigging, no animation. Use when the user wants a 3D print from an image."
 license: MIT
 ---
 
-# Trellis 3D Generation
+# Trellis print pipeline
 
-Use the **`trellis_*` MCP tools** to drive the local **Trellis.2** model (4B) on the
-DGX Spark and turn the user's request into a delivered 3D asset. Completion
-means **writing the requested file(s) to the requested location, inspecting a
-preview, and reporting the result** — submitting a generation or a loaded
-pipeline alone is not completion. Choose the shortest suitable pipeline and
-reuse existing assets for follow-ups.
+Use the `trellis_*` tools to turn one photo into a binary STL on the user's GPU. Completion means the STL is on disk, four solid views have been looked at, and the report states path, bytes, face count, extents, and watertight before and after repair.
 
-## Service state first (Trellis is local, and usually stopped)
+This is a print tool. Refuse rigging, animation, and any request to send the mesh to a paid 3D API. There is no text-to-3D: if the user has only a description, ask for a photo.
 
-Unlike a cloud service, Trellis runs only when you start it (it is normally
-stopped so the GPU is free for TensorFold/other LLM work). So:
+## Service
 
-1. Call **`trellis_health`** before doing anything else.
-2. If it reports **down / unreachable** and the user wants a model now:
-   - Tell the user in one line that starting Trellis will occupy the GPU
-     (and may slow or preempt LLM serving), and that the first model load
-     takes a while.
-   - Call **`trellis_start`** (optionally with `wait_seconds`). Surface the
-     result (`up`, `model_loaded`). If it does not come up, read
-     [Troubleshooting](references/troubleshooting.md) and report the likely
-     cause (e.g. a missing local weight file, or a node input name the server
-     rejects) and read [Troubleshooting](references/troubleshooting.md).
-3. If it reports **busy / a generation in flight**, say so and wait (do not
-   submit a competing job).
+1. Call `trellis_health`.
+2. If it is down, tell the user ComfyUI has to be started on the GPU machine. `trellis_start` only checks that the API answers. It does not boot the service.
+3. If `busy` is true, wait. Do not submit a second generation.
 
-Keep the service running while the user is iterating (several generations),
-but mention it costs GPU time, and offer to leave it up or let it be stopped
-later.
+## Make the print
 
-## Read what this request needs
+1. `trellis_image_to_3d` with the photo. Leave resolution unset, or pass `1536`. That is the maximum. The graph samples 50 steps per stage, remeshes at 1536, and keeps about 1,000,000 faces. Seed `0` is valid. Do not pass `512` or `1024` unless the user explicitly wants a draft.
+2. `trellis_wait_task` until it completes. Pass `timeout_seconds` in seconds.
+3. `trellis_download` the GLB. That file is the source mesh, not the slicer file.
+4. `trellis_render_preview` with `mode: "solid"` and `nviews: 4`. Show the frames with `MEDIA:<path>`. Four identical hashes mean the turntable failed. Look at the shape. Do not call a broken silhouette ready to print.
+5. `trellis_download` with `format: "stl"`, the path the user asked for, and `height_mm` when they named a size. Do not pass `face_budget` unless they asked for a smaller file. Omitting it keeps the dense mesh. Use `repair: true` only after the solid views look right. The tool checks `size == 84 + 50 * faces`. A file that starts with `glTF` is not an STL.
+6. Report path, bytes, face count, extents, watertight before and after repair, and the four view paths.
+7. On its own paragraph, emit the card the download tool returns, for example `::trellis-model{glb="/absolute/model.glb" stl="/absolute/model.stl"}`. The desktop plugin orbits the GLB when that plugin is enabled.
+8. If the user wants the slicer, call `trellis_open_slicer` with the STL path. It opens OrcaSlicer, PrusaSlicer, or BambuStudio when one of those apps is installed.
 
-| Need | Reference |
+`trellis_remesh_decimate` is the same local decimate when the user wants a new GLB instead of an STL. `remesh_band` and `remesh_project` do nothing.
+
+`trellis_texturize` is not a texture pass. Texture is already in the image-to-3D job. Calling it starts another full generation. Do not use it to recolor an existing mesh.
+
+## Formats
+
+| Ask | Do |
 |---|---|
-| DGX prerequisites, HF token, starting the service/bridge, config | [Setup](references/setup.md) |
-| Generating a model (params), PBR texturing, decimation/remesh, choosing an export format | [Pipelines](references/pipelines.md) |
-| Rendering a preview, showing it in chat, gallery, usage/"credits", status bar | [Delivery](references/delivery.md) |
-| Something failed or looked odd | [Troubleshooting](references/troubleshooting.md) |
+| GLB | `trellis_download` format `glb` |
+| STL for a printer | GLB, then format `stl` with face budget, height, and repair |
+| OBJ | format `obj`, local trimesh |
+| FBX, USDZ, rig, animation | Say those are not in this plugin |
 
-Read the relevant section when needed. Recipes are examples to adapt to the
-requested result, not a checklist of every stage. An untextured request skips
-texturing; a model already exported needs no re-export.
+Set `TRELLIS_PYTHON` to a Python that has `trimesh`. Face budgets also need `fast-simplification` in that environment. Without it, the STL is still written at the mesh's full face count.
 
-## What the model can and cannot do here
-
-- **Image → 3D** is the core (a single conditioning image → a textured mesh).
-- **No text-to-3D and no multi-view** in this model (unlike the cloud service this
-  mirrors). If the user only has a description, help them pick/generate a good
-  conditioning image first (e.g. via an image tool), then run it.
-- **PBR texturing** is built into the image→3D pipeline (the texture stage bakes
-  base color / metallic / roughness). `trellis_texturize` re-runs the same
-  generation job — it is **not** a separate texture-only pass.
-- **Export**: the server emits **GLB only** (`SaveGLB`) — full PBR, the native
-  output. This ComfyUI has **no STL/OBJ/FBX/USDZ nodes**, so
-  `trellis_download(format="stl")` falls back to the GLB. For **STL**
-  (print/cast), convert the GLB **locally** — see
-  [Pipelines](references/pipelines.md) → "GLB → printable binary STL".
-- **Decimation / remesh**: `trellis_remesh_decimate` targets the **legacy
-  bridge** backend only (`POST /tasks/:id/remesh`) — it is **not available** on
-  the default `comfyui` backend. Decimate locally with trimesh instead.
-- **Render preview** under an HDRI (modes incl. clay/base-color/forest/sunset/
-  courtyard), frames or a turntable.
-- **Gallery** of all models made + **usage** (local "credits": how many generated,
-  GPU-time estimate).
-
-## The standard pipeline
-
-1. **`trellis_health`** (and `trellis_start` if down, after the user heads-nods).
-2. **`trellis_image_to_3d`** with the conditioning image + resolution (512/1024/1536) +
-   seed (fix for repro) + optional label/prompt (stored in the gallery). Get the
-   `task_id`.
-3. **`trellis_wait_task`** (or `trellis_task_status`) until it completes; read the
-   error if it fails and act on [Troubleshooting](references/troubleshooting.md).
-4. **`trellis_download`** the GLB to the path the user wants. If they asked for
-   **STL** (print/cast), convert the GLB **locally** (Pipelines → "GLB → printable
-   binary STL") — the server has no STL exporter, so `format: "stl"` falls back to
-   the GLB.
-5. (Optional) **`trellis_render_preview`** to get a picture, and show it to the user
-   in chat (a `MEDIA:` image) — a missing preview does not block delivery.
-6. Report: file path(s), format, size, and that it's in the gallery. Mention GPU time
-   if the user cares.
-
-## Execution boundaries
-
-- Inputs are an image (local path, URL, or data URL). Large data-URLs should be pre-shrunk.
-- A fixed `seed` reproduces a model; `randomize_seed` varies it.
-- Treat generation as **costed** (GPU time): don't silently rerun an expensive job;
-  propose reruns/expensive higher resolutions before spending a lot.
-- Keep work within the user's approved scope; surface the GPU contention
-  (vs LLM serving) when starting the service.
-
-## Deliver
-
-Write the requested file(s) to the requested location(s). Inspect and show a
-preview (a rendered image) when available; a missing preview must not prevent
-delivery or be described as inspected. Report the result and any concrete
-limitation. A rendered image does not, by itself, establish topology
-quality — for print/cast, note that STL should be checked in the user's slicer/
-CAD if watertightness matters. The gallery already tracks what was made; offer
-to "show the gallery" on request.
+Gallery lists Trellis runs, newest first, with label and time. It does not inline textures. Usage is a count of those runs and their real GPU seconds, not a credit balance.

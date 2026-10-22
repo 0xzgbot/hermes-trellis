@@ -38,13 +38,16 @@
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { convertMesh, type PrintMeshResult } from "./print-mesh.js";
 import {
   fillImageTo3DWorkflow,
   CAPTURE_NODES,
   type ComfyWorkflow,
   type FillImageTo3DParams,
 } from "./workflow-image-to-3d.js";
+import { buildSolidViewWorkflow, RENDER_MODES, type RenderMode } from "./workflow-render.js";
 
 // ---------------------------------------------------------------------------
 // Public types (kept stable — tools.ts / index.ts / the skill rely on them)
@@ -241,6 +244,70 @@ function extOf(filename: string): string {
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg"];
 
+export interface MeshPrep {
+  faceBudget?: number;
+  heightMm?: number;
+  repair?: boolean;
+}
+
+export type WaitOpts = {
+  timeoutMs?: number;
+  intervalMs?: number;
+  onProgress?: (progress: number, total: number, message: string) => void;
+};
+
+function promptParts(entry: any): { graph: any; extra: Record<string, unknown> } {
+  const prompt = entry?.prompt;
+  if (Array.isArray(prompt)) {
+    const extra = prompt[3] && typeof prompt[3] === "object" ? (prompt[3] as Record<string, unknown>) : {};
+    return { graph: prompt[2], extra };
+  }
+  return { graph: null, extra: {} };
+}
+
+export function isTrellisGraph(graph: any): boolean {
+  if (!graph || typeof graph !== "object") return false;
+  return Object.values(graph).some(
+    (n: any) => n && (n.class_type === "Trellis2ShapeStage" || n.class_type === "Trellis2UpsampleStage"),
+  );
+}
+
+export function createTimeMs(entry: any): number | null {
+  const { extra } = promptParts(entry);
+  const raw = extra.create_time ?? entry?.created_at;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw) {
+    const t = Date.parse(raw);
+    if (Number.isFinite(t)) return t;
+  }
+  const msgs = entry?.status?.messages;
+  if (Array.isArray(msgs)) {
+    for (const m of msgs) {
+      if (Array.isArray(m) && m[0] === "execution_start" && typeof m[1]?.timestamp === "number") return m[1].timestamp;
+    }
+  }
+  return null;
+}
+
+function gpuSecondsOf(entry: any): number {
+  const msgs = entry?.status?.messages;
+  if (!Array.isArray(msgs)) return 0;
+  let t0: number | null = null;
+  let t1: number | null = null;
+  for (const m of msgs) {
+    if (!Array.isArray(m)) continue;
+    if (m[0] === "execution_start" && typeof m[1]?.timestamp === "number") t0 = m[1].timestamp;
+    if (m[0] === "execution_success" && typeof m[1]?.timestamp === "number") t1 = m[1].timestamp;
+  }
+  if (t0 != null && t1 != null && t1 >= t0) return (t1 - t0) / 1000;
+  return 0;
+}
+
+function isoFromMs(ms: number | null): string | undefined {
+  if (ms == null) return undefined;
+  return new Date(ms).toISOString();
+}
+
 /** Does a filename look like a raster image (png/jpg/jpeg)? */
 function isImageFile(filename: string): boolean {
   return IMAGE_EXTS.includes(extOf(filename));
@@ -250,13 +317,14 @@ function isImageFile(filename: string): boolean {
 async function pollUntilTerminal(
   taskFn: (id: string) => Promise<TaskRecord>,
   id: string,
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
+  opts: WaitOpts = {},
 ): Promise<TaskRecord> {
   const timeoutMs = opts.timeoutMs ?? 30 * 60 * 1000;
   const intervalMs = Math.max(500, opts.intervalMs ?? 1500);
   const startedAt = Date.now();
   for (;;) {
     const rec = await taskFn(id);
+    opts.onProgress?.(typeof rec.progress === "number" ? rec.progress : 0, 1, rec.stage || rec.status || "running");
     const st = (rec.status || "").toLowerCase() as TaskStatus;
     if (TERMINAL_OK.includes(st)) return rec;
     if (TERMINAL_BAD.includes(st)) {
@@ -347,9 +415,9 @@ export interface TrellisTransport {
   start(opts: { wait_seconds?: number; app_script?: string }): Promise<{ ok: boolean; up: boolean; model_loaded?: boolean; waited_ms?: number; note?: string }>;
   generate(p: GenerateRequest): Promise<{ id: string; status: TaskStatus }>;
   task(id: string): Promise<TaskRecord>;
-  waitForTask(id: string, opts?: { timeoutMs?: number; intervalMs?: number }): Promise<TaskRecord>;
-  downloadBinary(id: string, format: string, destPath?: string): Promise<{ path: string; bytes: number; mime: string }>;
-  render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean }): Promise<{ images: string[]; video?: string[]; note?: string }>;
+  waitForTask(id: string, opts?: WaitOpts): Promise<TaskRecord>;
+  downloadBinary(id: string, format: string, destPath?: string, prep?: MeshPrep): Promise<{ path: string; bytes: number; mime: string; prep?: PrintMeshResult }>;
+  render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean; onProgress?: WaitOpts["onProgress"] }): Promise<{ images: string[]; video?: string[]; note?: string }>;
   gallery(limit: number): Promise<{ items: GalleryItem[] }>;
   usage(): Promise<UsageInfo>;
   /** Generic JSON request (an escape hatch for ad-hoc endpoints, e.g. the bridge's remesh). */
@@ -488,16 +556,31 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
 
   async health(): Promise<HealthInfo> {
     try {
-      await this.reqJson("GET", "/system_stats", undefined, 8000);
+      const stats = await this.reqJson<any>("GET", "/system_stats", undefined, 8000);
+      let busy = false;
+      let queued = 0;
+      try {
+        const q = await this.reqJson<any>("GET", "/queue", undefined, 8000);
+        const running = Array.isArray(q?.queue_running) ? q.queue_running.length : 0;
+        queued = Array.isArray(q?.queue_pending) ? q.queue_pending.length : 0;
+        busy = running > 0;
+      } catch {
+        busy = false;
+      }
+      const dev = Array.isArray(stats?.devices) ? stats.devices[0] : undefined;
+      const free = typeof dev?.vram_free === "number" ? dev.vram_free / 1024 ** 3 : null;
       return {
         up: true,
         model_loaded: false,
-        busy: false,
-        gpu_free_gb: null,
+        busy,
+        gpu_free_gb: free,
         model_id: this.modelId,
         app_script: "comfyui",
         url: this.baseUrl,
-        note: "ComfyUI is up (Trellis.2 runs inside it; models load per workflow).",
+        note: busy
+          ? `ComfyUI is up and a job is running (${queued} queued). Trellis weights load per workflow; model_loaded is not reported by ComfyUI.`
+          : "ComfyUI is up. Trellis weights load per workflow; model_loaded is not reported by ComfyUI.",
+        queue_pending: queued,
       };
     } catch (e) {
       const hint = e instanceof BridgeError ? e.causeHint ?? e.message : (e as Error).message;
@@ -523,7 +606,7 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
     const contentType = this.guessContentType(hintName);
     const serverName = await this.uploadImage(imgBytes, hintName, contentType);
 
-    const resolution = Number(p.resolution ?? 1024) || 1024;
+    const resolution = Number(p.resolution ?? 1536) || 1536;
     const seed = p.randomize_seed ? Math.floor(Math.random() * 100000) : Number(p.seed ?? 42);
     const fillParams: FillImageTo3DParams = { image: serverName, resolution, seed };
     const workflow: ComfyWorkflow = fillImageTo3DWorkflow(fillParams);
@@ -549,99 +632,125 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
     return entryToTaskRecord(id, raw);
   }
 
-  async waitForTask(id: string, opts: { timeoutMs?: number; intervalMs?: number } = {}): Promise<TaskRecord> {
-    return pollUntilTerminal(this.task.bind(this), id, opts);
+  async waitForTask(id: string, opts: WaitOpts = {}): Promise<TaskRecord> {
+    const stop = this.watchComfyProgress(id, opts.onProgress);
+    try {
+      return await pollUntilTerminal(this.task.bind(this), id, opts);
+    } finally {
+      stop();
+    }
   }
 
-  async downloadBinary(id: string, format: string, destPath?: string): Promise<{ path: string; bytes: number; mime: string }> {
+  async downloadBinary(
+    id: string,
+    format: string,
+    destPath?: string,
+    prep?: MeshPrep,
+  ): Promise<{ path: string; bytes: number; mime: string; prep?: PrintMeshResult }> {
     const fmt = (format || "glb").toLowerCase().replace(/^\./, "");
-    const entry = await this.fetchHistoryEntry(id);
-    const flat = flattenOutputs(entry);
-    const ofFmt = flat.filter((fo) => fo.ref.filename.toLowerCase().endsWith(`.${fmt}`));
-    // Prefer the FINAL/textured asset over the raw/painted intermediates.
-    let pick = ofFmt.find((fo) => /final|textured/i.test(fo.nodeId) || /final|textured/i.test(fo.ref.filename));
-    if (!pick) pick = ofFmt[ofFmt.length - 1];
-    if (!pick) pick = flat.find((fo) => fo.ref.filename.toLowerCase().endsWith(`.${fmt}`));
-    if (!pick) pick = flat.filter((fo) => fo.ref.filename.toLowerCase().endsWith(".glb")).pop();
-    if (!pick) pick = flat.find((fo) => fo.ref.filename.toLowerCase().endsWith(".glb"));
-    if (!pick) {
-      throw new BridgeError(`No output found in ComfyUI history for task ${id} (format=${fmt}); the run may have failed.`, 404);
+    if (fmt === "fbx" || fmt === "usdz") {
+      throw new BridgeError(
+        `This install does not export ${fmt.toUpperCase()}. Download GLB, or STL/OBJ which are converted locally with trimesh.`,
+        415,
+        fmt,
+      );
     }
-    const urlPath = `/view?filename=${encodeURIComponent(pick.ref.filename)}&subfolder=${encodeURIComponent(pick.ref.subfolder)}&type=${encodeURIComponent(pick.ref.type)}`;
-    const res = await this.getBinary(urlPath, 120000);
-    if (res.status !== 200) {
-      throw new BridgeError(`ComfyUI GET ${urlPath} -> HTTP ${res.status}`, res.status);
+    if (!destPath) throw new BridgeError("downloadBinary requires a destPath (caller decides location).", 400);
+    const glb = await this.saveGlb(id, fmt === "glb" && !prep?.faceBudget && prep?.heightMm === undefined ? destPath : undefined);
+    if (fmt === "glb" && !prep?.faceBudget && prep?.heightMm === undefined && !prep?.repair) {
+      return { path: glb.path, bytes: glb.bytes, mime: mimeForFmt("glb") };
     }
-    if (!destPath) {
-      throw new BridgeError("downloadBinary requires a destPath (caller decides location).", 400);
-    }
+    const outFmt = fmt === "obj" || fmt === "stl" || fmt === "glb" ? fmt : "glb";
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.writeFileSync(destPath, res.bytes);
-    return { path: destPath, bytes: res.bytes.length, mime: mimeForFmt(fmt) };
-  }
-
-  async render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean } = {}): Promise<{ images: string[]; video?: string[]; note?: string }> {
-    const nviews = Math.max(1, Math.min(64, opts.nviews ?? 8));
-    const entry = await this.fetchHistoryEntry(taskId);
-    const flat = flattenOutputs(entry).filter((fo) => isImageFile(fo.ref.filename));
-    const images: string[] = [];
-    for (const fo of flat) {
-      if (images.length >= nviews) break;
-      const urlPath = `/view?filename=${encodeURIComponent(fo.ref.filename)}&subfolder=${encodeURIComponent(fo.ref.subfolder)}&type=${encodeURIComponent(fo.ref.type)}`;
+    const converted = await convertMesh({
+      src: glb.path,
+      dest: destPath,
+      format: outFmt,
+      faceBudget: prep?.faceBudget,
+      heightMm: prep?.heightMm,
+      repair: prep?.repair,
+    });
+    if (fmt !== "glb" && glb.path !== destPath) {
       try {
-        const res = await this.getBinary(urlPath, 60000);
-        if (res.status === 200) {
-          const b64 = res.bytes.toString("base64");
-          images.push(`data:image/png;base64,${b64}`);
-        }
-      } catch (e) {
-        this.log(`[comfyui] render: failed to fetch ${fo.ref.filename}: ${String(e)}`);
+        fs.unlinkSync(glb.path);
+      } catch {
+        /* temp glb */
       }
     }
+    return { path: converted.path, bytes: converted.bytes, mime: mimeForFmt(outFmt), prep: converted };
+  }
+
+  async render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean; onProgress?: WaitOpts["onProgress"] } = {}): Promise<{ images: string[]; video?: string[]; note?: string }> {
+    const mode = (opts.mode ?? "solid") as RenderMode;
+    if (!RENDER_MODES.includes(mode)) {
+      throw new BridgeError(
+        `mode "${opts.mode}" is not a RenderMesh mode. Use one of: ${RENDER_MODES.join(", ")}.`,
+        422,
+        String(opts.mode),
+      );
+    }
+    const nviews = Math.max(1, Math.min(8, opts.nviews ?? 4));
+    const entry = await this.fetchHistoryEntry(taskId);
+    const glbRef = this.pickGlb(flattenOutputs(entry));
+    if (!glbRef) throw new BridgeError(`No GLB in task ${taskId} to render.`, 404);
+    const urlPath = this.viewPath(glbRef.ref);
+    const bin = await this.getBinary(urlPath, 180000);
+    if (bin.status !== 200 && bin.status !== 206) {
+      throw new BridgeError(`ComfyUI GET ${urlPath} -> HTTP ${bin.status}`, bin.status);
+    }
+    const uploaded = await this.uploadModel(bin.bytes, glbRef.ref.filename.endsWith(".glb") ? path.basename(glbRef.ref.filename) : `${taskId}.glb`);
+    const prefix = `3d/trellis_print_${Date.now().toString(36)}`;
+    const { workflow, capture } = buildSolidViewWorkflow({ modelFile: uploaded, mode, nviews, prefix });
+    const clientId = randomUUID();
+    const queued = await this.reqJson<{ prompt_id: string }>(
+      "POST",
+      "/api/prompt",
+      { client_id: clientId, prompt: workflow, output: capture, extra_data: { source_task: taskId, mode, nviews } },
+      60000,
+    );
+    if (!queued?.prompt_id) throw new BridgeError("Render POST /api/prompt returned no prompt_id", 200);
+    await this.waitForTask(queued.prompt_id, { timeoutMs: 180000, intervalMs: 1000, onProgress: opts.onProgress });
+    const done = await this.fetchHistoryEntry(queued.prompt_id);
+    const images: string[] = [];
+    const frames = flattenOutputs(done)
+      .filter((fo) => isImageFile(fo.ref.filename))
+      .sort((a, b) => a.ref.filename.localeCompare(b.ref.filename));
+    for (const fo of frames) {
+      const view = this.viewPath(fo.ref);
+      const res = await this.getBinary(view, 60000);
+      if (res.status === 200) images.push(`data:image/png;base64,${res.bytes.toString("base64")}`);
+    }
+    if (images.length === 0) throw new BridgeError(`Render ${queued.prompt_id} finished with no PNG output.`, 500);
+    const videoNote = opts.video ? " No mp4 is encoded; the frames are the turntable." : "";
     return {
       images,
-      video: opts.video && images.length >= 4 ? images : [],
-      note: `Rendered ${images.length} preview frame(s) (ComfyUI /view)${opts.video ? " + turntable assembled" : ""}.`,
+      video: undefined,
+      note: `Rendered ${images.length} ${mode} view(s) via RenderMesh.${videoNote}`,
     };
   }
 
   async gallery(limit: number): Promise<{ items: GalleryItem[] }> {
-    const raw = await this.reqJson<Record<string, any>>("GET", "/history", undefined, 30000);
-    const entries = raw || {};
-    const ids = Object.keys(entries);
-    ids.sort((a, b) => {
-      const ta = this.entryTimestamp(entries[a]) || "";
-      const tb = this.entryTimestamp(entries[b]) || "";
-      if (ta && tb) return ta < tb ? 1 : -1;
-      if (ta && !tb) return -1;
-      if (!ta && tb) return 1;
-      return 0;
-    });
+    const entries = (await this.reqJson<Record<string, any>>("GET", "/history", undefined, 30000)) || {};
+    const rows = Object.keys(entries)
+      .map((pid) => ({ pid, entry: entries[pid], t: createTimeMs(entries[pid]) }))
+      .filter((row) => isTrellisGraph(promptParts(row.entry).graph))
+      .sort((a, b) => (b.t ?? 0) - (a.t ?? 0))
+      .slice(0, limit);
     const items: GalleryItem[] = [];
-    for (const pid of ids.slice(0, limit)) {
-      const e = entries[pid];
-      const flat = flattenOutputs(e);
-      const formats = deriveFormatList(e);
-      const thumbRef = flat.find((fo) => isImageFile(fo.ref.filename));
-      let thumb: string | null = null;
-      if (thumbRef) {
-        const urlPath = `/view?filename=${encodeURIComponent(thumbRef.ref.filename)}&subfolder=${encodeURIComponent(thumbRef.ref.subfolder)}&type=${encodeURIComponent(thumbRef.ref.type)}`;
-        try {
-          const res = await this.getBinary(urlPath, 30000);
-          if (res.status === 200) {
-            thumb = `data:image/png;base64,${res.bytes.toString("base64")}`;
-          }
-        } catch {
-          thumb = null;
-        }
-      }
+    for (const row of rows) {
+      const { extra } = promptParts(row.entry);
+      const flat = flattenOutputs(row.entry);
+      const preview = await this.smallestImage(flat);
       items.push({
-        id: pid,
-        label: undefined,
-        created_at: this.entryTimestamp(e) || undefined,
+        id: row.pid,
+        label: typeof extra.label === "string" ? extra.label : undefined,
+        created_at: isoFromMs(row.t),
         model_id: this.modelId,
-        formats,
-        thumbnail: thumb,
+        formats: deriveFormatList(row.entry),
+        thumbnail: null,
+        preview_filename: preview?.ref.filename,
+        preview_subfolder: preview?.ref.subfolder,
+        preview_type: preview?.ref.type,
         input_image: null,
       });
     }
@@ -649,31 +758,19 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
   }
 
   async usage(): Promise<UsageInfo> {
-    const raw = await this.reqJson<Record<string, any>>("GET", "/history", undefined, 30000);
-    const entries = raw || {};
-    const ids = Object.keys(entries);
-    const total = ids.length;
-    let lastId: string | null = null;
-    if (ids.length > 0) {
-      const sorted = ids
-        .map((pid) => ({ pid, ts: this.entryTimestamp(entries[pid]) }))
-        .sort((a, b) => {
-          const ta = a.ts || "";
-          const tb = b.ts || "";
-          if (ta && tb) return ta < tb ? 1 : -1;
-          if (ta && !tb) return -1;
-          if (!ta && tb) return 1;
-          return 0;
-        });
-      if (sorted.length > 0) lastId = sorted[0].pid;
-    }
-    const gpuSeconds = total * 20;
+    const entries = (await this.reqJson<Record<string, any>>("GET", "/history", undefined, 30000)) || {};
+    const rows = Object.keys(entries)
+      .map((pid) => ({ pid, entry: entries[pid], t: createTimeMs(entries[pid]) }))
+      .filter((row) => isTrellisGraph(promptParts(row.entry).graph))
+      .sort((a, b) => (b.t ?? 0) - (a.t ?? 0));
+    const gpu = rows.reduce((sum, row) => sum + gpuSecondsOf(row.entry), 0);
+    const last = rows[0];
     return {
-      total_generated: total,
-      gpu_seconds_estimate: gpuSeconds,
-      last_task_id: lastId,
-      last_task_at: lastId ? this.entryTimestamp(entries[lastId]) || null : null,
-      credits_used: total,
+      total_generated: rows.length,
+      gpu_seconds_estimate: Math.round(gpu * 10) / 10,
+      last_task_id: last?.pid ?? null,
+      last_task_at: last ? isoFromMs(last.t) ?? null : null,
+      credits_used: rows.length,
     };
   }
 
@@ -740,11 +837,114 @@ export class ComfyUITransport extends BaseTrellisClient implements TrellisTransp
     return map[ext] ?? "image/jpeg";
   }
 
-  private entryTimestamp(entry: any): string | null {
-    if (!entry || typeof entry !== "object") return null;
-    if (entry.created_at) return entry.created_at as string;
-    if (entry.started_at) return entry.started_at as string;
-    return null;
+  private pickGlb(flat: NodeOutput[]): NodeOutput | undefined {
+    const glbs = flat.filter((fo) => fo.ref.filename.toLowerCase().endsWith(".glb"));
+    return (
+      glbs.find((fo) => /final|textured/i.test(fo.nodeId) || /final|textured/i.test(fo.ref.filename)) ??
+      glbs[glbs.length - 1]
+    );
+  }
+
+  private viewPath(ref: OutputRef): string {
+    return `/view?filename=${encodeURIComponent(ref.filename)}&subfolder=${encodeURIComponent(ref.subfolder)}&type=${encodeURIComponent(ref.type)}`;
+  }
+
+  /** Download the textured GLB. Pass destPath to keep that file; otherwise a temp file is used. */
+  private async saveGlb(id: string, destPath?: string): Promise<{ path: string; bytes: number }> {
+    const entry = await this.fetchHistoryEntry(id);
+    const pick = this.pickGlb(flattenOutputs(entry));
+    if (!pick) throw new BridgeError(`No GLB in ComfyUI history for task ${id}.`, 404);
+    const urlPath = this.viewPath(pick.ref);
+    const res = await this.getBinary(urlPath, 180000);
+    if (res.status !== 200 && res.status !== 206) {
+      throw new BridgeError(`ComfyUI GET ${urlPath} -> HTTP ${res.status}`, res.status);
+    }
+    const dest = destPath ?? path.join(os.tmpdir(), `trellis-${id}.glb`);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, res.bytes);
+    return { path: dest, bytes: res.bytes.length };
+  }
+
+  private async uploadModel(bytes: Buffer, filename: string): Promise<string> {
+    const form = new FormData();
+    form.append("image", new Blob([bytes], { type: "model/gltf-binary" }), filename);
+    form.append("subfolder", "3d");
+    const url = `${this.baseUrl}/upload/image`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 180000);
+    try {
+      const res = await this.fetchFn(url, { method: "POST", body: form, signal: controller.signal });
+      const text = await res.text();
+      if (!res.ok) throw new BridgeError(`Trellis POST /upload/image -> HTTP ${res.status}: ${text.slice(0, 200)}`, res.status);
+      const j = text ? JSON.parse(text) : null;
+      const name = j && typeof j.name === "string" ? j.name : filename;
+      const sub = j && typeof j.subfolder === "string" ? j.subfolder : "";
+      return sub ? `${sub}/${name}` : name;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Smallest PNG at or under 300KB, probed with a 1-byte range so a 4096 texture is not inlined. */
+  private async smallestImage(flat: NodeOutput[]): Promise<NodeOutput | null> {
+    const imgs = flat.filter((fo) => isImageFile(fo.ref.filename)).slice(0, 8);
+    let best: { fo: NodeOutput; size: number } | null = null;
+    for (const fo of imgs) {
+      const size = await this.contentLength(fo.ref);
+      if (size == null || size > 300_000) continue;
+      if (!best || size < best.size) best = { fo, size };
+    }
+    return best?.fo ?? null;
+  }
+
+  /** ComfyUI /ws progress events for one prompt. No-op when WebSocket is missing. */
+  private watchComfyProgress(promptId: string, onProgress?: WaitOpts["onProgress"]): () => void {
+    if (!onProgress || typeof WebSocket === "undefined") return () => undefined;
+    let ws: WebSocket;
+    try {
+      const wsUrl = `${this.baseUrl.replace(/^http/, "ws")}/ws?clientId=${randomUUID()}`;
+      ws = new WebSocket(wsUrl);
+    } catch {
+      return () => undefined;
+    }
+    ws.addEventListener("message", (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data));
+        const data = msg?.data;
+        if (!data || data.prompt_id !== promptId) return;
+        if (msg.type === "progress" && typeof data.value === "number" && typeof data.max === "number" && data.max > 0) {
+          onProgress(data.value, data.max, data.node ? `node ${data.node}` : "sampling");
+        } else if (msg.type === "executing") {
+          onProgress(0, 1, data.node ? `running ${data.node}` : "running");
+        }
+      } catch {
+        /* ignore malformed socket frames */
+      }
+    });
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        /* already closed */
+      }
+    };
+  }
+
+  private async contentLength(ref: OutputRef): Promise<number | null> {
+    const url = `${this.baseUrl}${this.viewPath(ref)}`;
+    try {
+      const res = await this.fetchFn(url, { headers: { range: "bytes=0-0" } });
+      const cr = res.headers.get("content-range");
+      await res.arrayBuffer();
+      if (cr && cr.includes("/")) {
+        const total = Number(cr.split("/").pop());
+        if (Number.isFinite(total)) return total;
+      }
+      const len = Number(res.headers.get("content-length"));
+      return Number.isFinite(len) ? len : null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -793,7 +993,7 @@ export class BridgeTransport extends BaseTrellisClient implements TrellisTranspo
     return pollUntilTerminal(this.task.bind(this), id, opts);
   }
 
-  async downloadBinary(id: string, format: string, destPath?: string): Promise<{ path: string; bytes: number; mime: string }> {
+  async downloadBinary(id: string, format: string, destPath?: string, _prep?: MeshPrep): Promise<{ path: string; bytes: number; mime: string }> {
     const fmt = (format || "glb").toLowerCase().replace(/^\./, "");
     const url = `/tasks/${encodeURIComponent(id)}/download?format=${encodeURIComponent(fmt)}`;
     const res = await this.getBinary(url, 120000);
@@ -853,7 +1053,7 @@ export class TrellisBridgeClient implements TrellisTransport {
     } else if (backend === "bridge") {
       baseUrl = process.env.TRELLIS_BRIDGE_URL ?? "http://127.0.0.1:7861";
     } else {
-      baseUrl = process.env.TRELLIS_API_URL ?? "http://127.0.0.1:8188";
+      baseUrl = process.env.TRELLIS_API_URL || "http://127.0.0.1:8188";
     }
 
     const base: ConstructorParameters<typeof BaseTrellisClient>[0] = {
@@ -890,15 +1090,15 @@ export class TrellisBridgeClient implements TrellisTransport {
     return this.transport.task(id);
   }
 
-  async waitForTask(id: string, opts: { timeoutMs?: number; intervalMs?: number } = {}): Promise<TaskRecord> {
+  async waitForTask(id: string, opts: WaitOpts = {}): Promise<TaskRecord> {
     return this.transport.waitForTask(id, opts);
   }
 
-  downloadBinary(id: string, format: string, destPath?: string): Promise<{ path: string; bytes: number; mime: string }> {
-    return this.transport.downloadBinary(id, format, destPath);
+  downloadBinary(id: string, format: string, destPath?: string, prep?: MeshPrep): Promise<{ path: string; bytes: number; mime: string; prep?: PrintMeshResult }> {
+    return this.transport.downloadBinary(id, format, destPath, prep);
   }
 
-  render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean } = {}): Promise<{ images: string[]; video?: string[]; note?: string }> {
+  render(taskId: string, opts: { mode?: string; nviews?: number; video?: boolean; onProgress?: WaitOpts["onProgress"] } = {}): Promise<{ images: string[]; video?: string[]; note?: string }> {
     return this.transport.render(taskId, opts);
   }
 

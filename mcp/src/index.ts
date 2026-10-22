@@ -5,14 +5,16 @@
  * Instantiate an McpServer, register every Trellis tool from
  * tools.ts against a shared bridge client, and connect over
  * stdio. The client points at the local Trellis service on the
- * DGX Spark via TRELLIS_API_URL (default http://127.0.0.1:7861; set TRELLIS_API_URL to your DGX URL).
+ * GPU machine via TRELLIS_API_URL (default http://127.0.0.1:8188).
  *
  * Register in ~/.hermes/config.yaml:
  *   mcp_servers:
  *     trellis:
  *       command: node
  *       args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
- *       env: { TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:7861" }
+ *       env:
+ *         TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"
+ *         TRELLIS_PYTHON: "python3"
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,11 +33,13 @@ import {
   makeRemeshTool,
   makeGalleryTool,
   makeUsageTool,
+  makeSlicerTool,
   type ToolContext,
+  type ToolExtra,
 } from "./tools.js";
 
 function outDirFromEnv(): string {
-  return process.env.TRELLIS_OUT_DIR ?? `${process.cwd()}/trellis-out`;
+  return process.env.TRELLIS_OUT_DIR || `${process.cwd()}/trellis-out`;
 }
 
 async function main(): Promise<void> {
@@ -66,6 +70,7 @@ async function main(): Promise<void> {
     makeRemeshTool(ctx),
     makeGalleryTool(ctx),
     makeUsageTool(ctx),
+    makeSlicerTool(ctx),
   ]) {
     server.registerTool(
       tool.name,
@@ -73,7 +78,8 @@ async function main(): Promise<void> {
         description: tool.desc,
         inputSchema: tool.schema,
       },
-      async (args) => tool.handler((args ?? {}) as Record<string, unknown>),
+      async (args: Record<string, unknown> | undefined, extra: ToolExtra) =>
+        tool.handler((args ?? {}) as Record<string, unknown>, extra),
     );
   }
 

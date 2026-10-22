@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "trellis": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/mcp/dist/index.js"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "TRELLIS_API_URL": "${TRELLIS_API_URL}",
+        "TRELLIS_PYTHON": "${TRELLIS_PYTHON}",
+        "TRELLIS_OUT_DIR": "${TRELLIS_OUT_DIR}"
+      }
+    }
+  }
+}

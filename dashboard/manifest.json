@@ -1,0 +1,7 @@
+{
+  "name": "trellis",
+  "label": "Trellis",
+  "description": "Serves local GLB bytes, print provenance, and ComfyUI queue status to the desktop card.",
+  "version": "0.2.0",
+  "api": "plugin_api.py"
+}

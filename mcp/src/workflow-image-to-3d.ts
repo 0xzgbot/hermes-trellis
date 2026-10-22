@@ -26,8 +26,9 @@
  *
  * Placeholders (substituted by `fillImageTo3DWorkflow` at submit time):
  *   {{CONDITIONING_IMAGE}} -> the server-side filename of the uploaded image
- *   {{RESOLUTION}}         -> the target 3D resolution bucket (512/1024/1536)
- *   {{SEED:n}}             -> seed + n (each diffusion stage gets a distinct seed)
+ *   {{RESOLUTION}}         -> Trellis2UpsampleStage.target_resolution only (512/1024/1536).
+ *                            Crop and UV atlas stay at 1024, matching a live 1536 run.
+ *   {{SEED:n}}             -> seed + n (0 is a valid seed; it is not replaced)
  *
  * `CAPTURE_NODES` is the `output` list sent to `POST /api/prompt`: the node ids
  * whose products ComfyUI retains (and we later fetch via /history + /view).
@@ -51,14 +52,14 @@ export const IMAGE_TO_3D_WORKFLOW: ComfyWorkflow = {
   "93": { class_type: "VaeDecodeTextureTrellis", inputs: { "samples": ["12", 0], "vae": ["118", 0], "shape_subdivides": ["92", 1] } },
   "15": { class_type: "CLIPVisionLoader", inputs: { "clip_name": "dino_v3_L_naf_fp32.safetensors" } },
   "202": { class_type: "GetMeshInfo", inputs: { "mesh": ["92", 0] } },
-  "261": { class_type: "RenderUVAtlas", inputs: { "mesh": ["196", 0], "resolution": "{{RESOLUTION}}" } },
+  "261": { class_type: "RenderUVAtlas", inputs: { "mesh": ["196", 0], "resolution": 1024 } },
   "262": { class_type: "PreviewImage", inputs: { "images": ["261", 0] } },
-  "12": { class_type: "KSampler", inputs: { "model": ["318", 0], "seed": "{{SEED:1}}", "steps": 12, "cfg": 1.0, "sampler_name": "euler", "scheduler": "normal", "positive": ["98", 0], "negative": ["98", 1], "latent_image": ["98", 2], "denoise": 1.0 } },
+  "12": { class_type: "KSampler", inputs: { "model": ["318", 0], "seed": "{{SEED:1}}", "steps": 50, "cfg": 1.0, "sampler_name": "euler", "scheduler": "normal", "positive": ["98", 0], "negative": ["98", 1], "latent_image": ["98", 2], "denoise": 1.0 } },
   "210": { class_type: "ApplyTextureToMesh", inputs: { "mesh": ["196", 0], "base_color": ["164", 0], "metallic": ["207", 0], "roughness": ["208", 0], "occlusion": ["235", 0], "normal_map": ["226", 0] } },
   "147": { class_type: "BakeTextureFromVoxel", inputs: { "mesh": ["196", 0], "voxel_colors": ["93", 0], "texture_size": ["288", 0], "reference_mesh": ["92", 0] } },
   "288": { class_type: "PrimitiveInt", inputs: { "value": 4096 } },
   "238": { class_type: "MeshSmoothNormals", inputs: { "mesh": ["186", 0], "crease_angle": 180.0 } },
-  "18": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 20, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["91", 0], "negative": ["91", 1], "latent_image": ["91", 2], "denoise": 1.0 } },
+  "18": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 50, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["91", 0], "negative": ["91", 1], "latent_image": ["91", 2], "denoise": 1.0 } },
   "252": { class_type: "PaintMesh", inputs: { "mesh": ["238", 0], "voxel_colors": ["93", 0] } },
   "279": { class_type: "CFGOverride", inputs: { "model": ["318", 0], "cfg": 1.0, "start_percent": 0.769, "end_percent": 1.0 } },
   "126": { class_type: "RescaleCFG", inputs: { "model": ["279", 0], "multiplier": 0.5 } },
@@ -69,7 +70,7 @@ export const IMAGE_TO_3D_WORKFLOW: ComfyWorkflow = {
   "119": { class_type: "VaeDecodeStructureTrellis2", inputs: { "samples": ["3", 0], "vae": ["117", 0], "resolution": "32" } },
   "4": { class_type: "VoxelToMesh", inputs: { "voxel": ["119", 0], "algorithm": "basic", "threshold": 0.6 } },
   "247": { class_type: "MeshToFile3D", inputs: { "mesh": ["4", 0] } },
-  "3": { class_type: "KSampler", inputs: { "model": ["108", 0], "seed": "{{SEED:14}}", "steps": 12, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["314", 0], "negative": ["315", 0], "latent_image": ["87", 0], "denoise": 1.0 } },
+  "3": { class_type: "KSampler", inputs: { "model": ["108", 0], "seed": "{{SEED:14}}", "steps": 50, "cfg": 7.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["314", 0], "negative": ["315", 0], "latent_image": ["87", 0], "denoise": 1.0 } },
   "125": { class_type: "RescaleCFG", inputs: { "model": ["199", 0], "multiplier": 0.7 } },
   "199": { class_type: "CFGOverride", inputs: { "model": ["318", 0], "cfg": 1.0, "start_percent": 0.667, "end_percent": 1.0 } },
   "108": { class_type: "ModelSamplingSD3", inputs: { "model": ["125", 0], "shift": 5.0 } },
@@ -78,8 +79,8 @@ export const IMAGE_TO_3D_WORKFLOW: ComfyWorkflow = {
   "224": { class_type: "BakeNormalMapFromMesh", inputs: { "low_poly": ["196", 0], "high_poly": ["241", 0], "resolution": 2048, "cage_distance": 0.05, "ignore_backfaces": true } },
   "226": { class_type: "PreviewImage", inputs: { "images": ["224", 0] } },
   "235": { class_type: "PreviewImage", inputs: { "images": ["233", 0] } },
-  "241": { class_type: "RemeshMesh", inputs: { "mesh": ["202", 0], "resolution": 768, "sign_mode": "solid", "sign_mode.fill": 20.0, "sign_mode.qef": false, "band": 1.0, "project_back": 0.0, "fix_poles": false, "smooth_iters": 20, "drop_small_components": 0.01, "precluster_max_verts": 20000000 } },
-  "186": { class_type: "DecimateMesh", inputs: { "mesh": ["241", 0], "target_face_count": 700000, "placement_mode": "midpoint" } },
+  "241": { class_type: "RemeshMesh", inputs: { "mesh": ["202", 0], "resolution": 1536, "sign_mode": "solid", "sign_mode.fill": 20.0, "sign_mode.qef": false, "band": 1.0, "project_back": 0.0, "fix_poles": false, "smooth_iters": 20, "drop_small_components": 0.01, "precluster_max_verts": 20000000 } },
+  "186": { class_type: "DecimateMesh", inputs: { "mesh": ["241", 0], "target_face_count": 1000000, "placement_mode": "midpoint" } },
   "196": { class_type: "UnwrapMesh", inputs: { "mesh": ["238", 0], "segmenter": "pec", "resolution": ["288", 0], "padding": 1, "weld_distance": 0.0002 } },
   "117": { class_type: "VAELoader", inputs: { "vae_name": "trellis_2_shape_vae_bf16.safetensors" } },
   "55": { class_type: "LoadMoGeModel", inputs: { "model_name": "moge_2_vitl_normal_fp16.safetensors" } },
@@ -95,9 +96,9 @@ export const IMAGE_TO_3D_WORKFLOW: ComfyWorkflow = {
   "260": { class_type: "MeshSmoothNormals", inputs: { "mesh": ["210", 0], "crease_angle": 180.0 } },
   "285": { class_type: "MeshToFile3D", inputs: { "mesh": ["260", 0] } },
   "87": { class_type: "EmptyTrellis2LatentStructure", inputs: { "batch_size": 1 } },
-  "23": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 12, "cfg": 7.5, "sampler_name": "euler", "scheduler": "simple", "positive": ["94", 0], "negative": ["94", 1], "latent_image": ["94", 2], "denoise": 1.0 } },
+  "23": { class_type: "KSampler", inputs: { "model": ["126", 0], "seed": "{{SEED:0}}", "steps": 50, "cfg": 7.5, "sampler_name": "euler", "scheduler": "simple", "positive": ["94", 0], "negative": ["94", 1], "latent_image": ["94", 2], "denoise": 1.0 } },
   "122": { class_type: "LoadImage", inputs: { "image": "{{CONDITIONING_IMAGE}}" } },
-  "312": { class_type: "ImageCropToMask", inputs: { "images": ["122", 0], "masks": ["303", 0], "width": "{{RESOLUTION}}", "height": "{{RESOLUTION}}", "pad_factor": 1.1, "grow_mask": 0, "background": "#000000" } },
+  "312": { class_type: "ImageCropToMask", inputs: { "images": ["122", 0], "masks": ["303", 0], "width": 1024, "height": 1024, "pad_factor": 1.1, "grow_mask": 0, "background": "#000000" } },
   "314": { class_type: "ComfySwitchNode", inputs: { "switch": ["316", 0], "on_false": ["298", 0], "on_true": ["299", 0] } },
   "315": { class_type: "ComfySwitchNode", inputs: { "switch": ["316", 0], "on_false": ["298", 1], "on_true": ["299", 1] } },
   "316": { class_type: "PrimitiveBoolean", inputs: { "value": true } },
@@ -136,8 +137,9 @@ function cloneWorkflow(wf: ComfyWorkflow): ComfyWorkflow {
  */
 export function fillImageTo3DWorkflow(params: FillImageTo3DParams): ComfyWorkflow {
   const wf = cloneWorkflow(IMAGE_TO_3D_WORKFLOW);
-  const res = Number(params.resolution) || 1024;
-  const baseSeed = Number(params.seed) || 42;
+  const resNum = Number(params.resolution);
+  const res = Number.isFinite(resNum) && resNum > 0 ? resNum : 1536;
+  const baseSeed = Number.isFinite(Number(params.seed)) ? Number(params.seed) : 42;
   for (const node of Object.values(wf)) {
     const inputs = node.inputs;
     for (const [key, rawVal] of Object.entries(inputs)) {

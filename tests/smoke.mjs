@@ -37,6 +37,8 @@ import path from "node:path";
 
 // Import the BUILT modules (so we test exactly what ships).
 const { TrellisBridgeClient } = await import("../mcp/dist/bridge.js");
+const { fillImageTo3DWorkflow } = await import("../mcp/dist/workflow-image-to-3d.js");
+const { buildSolidViewWorkflow } = await import("../mcp/dist/workflow-render.js");
 const T = await import("../mcp/dist/tools.js");
 
 // A tiny valid 1x1 PNG (base64) — used for render frames + gallery thumbs.
@@ -182,6 +184,7 @@ function startMockComfyUI() {
         }
         const pid = `pid_${tasks.size + 1}_${Date.now().toString(36)}`;
         const task = makeTask(pid, "executing", 0.05, body.extra_data?.label);
+        task.graph = body.prompt;
         task.image = body.extra_data?.seed;
         tasks.set(pid, task);
         usage.total_generated += 1;
@@ -189,6 +192,10 @@ function startMockComfyUI() {
         usage.last_task_id = pid;
         usage.last_task_at = new Date().toISOString();
         return send(200, { prompt_id: pid, number: tasks.size });
+      }
+
+      if (req.method === "GET" && p === "/history/stuck") {
+        return send(200, { stuck: { status: { status_str: "executing", messages: [] }, outputs: {}, prompt: [1, "stuck", {}, {}, []] } });
       }
 
       // 4) single-task history: WRAPPED as { [id]: entry }
@@ -212,13 +219,15 @@ function startMockComfyUI() {
           t.sizes = { glb: 1048576, png: 64 };
         }
         const entry = {
-          prompt: { note: "mock comfyui workflow" },
-          status: { status_str: t.status_str, messages: [["status", t.status_str]] },
+          prompt: [
+            1,
+            id,
+            t.graph || {},
+            { label: t.label, create_time: Date.parse(t.created_at) },
+            ["24"],
+          ],
+          status: { status_str: t.status_str, messages: [["execution_start", { timestamp: Date.parse(t.created_at) }], ["execution_success", { timestamp: Date.parse(t.created_at) + 1000 }]] },
           outputs: t.outputs,
-          extra_data: t.label ? { label: t.label } : {},
-          created_at: t.created_at,
-          updated_at: t.updated_at,
-          finished_at: t.finished_at,
         };
         // ComfyUI contract: key the wrapper by the prompt id.
         return send(200, { [id]: entry });
@@ -230,25 +239,29 @@ function startMockComfyUI() {
         for (const [id, t] of tasks) {
           if (t.status_str !== "success") continue; // not finished yet
           out[id] = {
-            prompt: {},
-            status: { status_str: t.status_str, messages: [["status", t.status_str]] },
+            prompt: [
+              1,
+              id,
+              t.graph || {},
+              { label: t.label, create_time: Date.parse(t.created_at) },
+              ["24"],
+            ],
+            status: { status_str: t.status_str, messages: [["execution_success", { timestamp: Date.parse(t.created_at) + 1000 }]] },
             outputs: t.outputs,
-            extra_data: {},
-            created_at: t.created_at,
-            updated_at: t.updated_at,
-            finished_at: t.finished_at,
           };
         }
         // Seeded gallery entries (pre-existing models).
         for (const s of gallerySeed) {
           out[s.id] = {
-            prompt: {},
-            status: { status_str: "success", messages: [["status", "success"]] },
-            outputs: { "61": { images: [{ filename: "thumb_gold.png", subfolder: "", type: "temp" }] } },
-            extra_data: {},
-            created_at: s.created_at,
-            updated_at: s.created_at,
-            finished_at: s.created_at,
+            prompt: [
+              1,
+              s.id,
+              { "91": { class_type: "Trellis2ShapeStage", inputs: {} } },
+              { label: s.label, create_time: Date.parse(s.created_at) },
+              ["61"],
+            ],
+            status: { status_str: "success", messages: [["execution_success", { timestamp: Date.parse(s.created_at) + 5000 }]] },
+            outputs: { "61": { images: [{ filename: "model.glb", subfolder: "3d", type: "output" }] } },
           };
         }
         return send(200, out);
@@ -380,24 +393,22 @@ async function main() {
     check("payload is glTF-shaped (magic ok)", head.startsWith("glTF"), "head=" + JSON.stringify(head));
   }
 
-  // 6b) explicit format=stl: the ComfyUI transport has no separate STL step,
-  //     so it falls back to the shipped .glb artifact; the tool must not error.
-  console.log("\n6b) trellis_download (format stl, falls back to glb artifact):");
+  // 6b) the mock GLB is not a mesh, so STL conversion must fail instead of
+  //     writing glTF bytes under an .stl name.
+  console.log("\n6b) trellis_download (format stl refuses a non-mesh):");
   const destStl = path.join(outDir, taskId + ".stl");
   r = await T.makeDownloadTool(ctx).handler({ task_id: taskId, format: "stl", dest: destStl });
-  check("download with format=stl is not an error", !r.isError, r.isError ? r.content[0].text : "");
-  check("a file was written for format=stl", fs.existsSync(destStl));
+  check("fake glb is not reported as an STL", r.isError === true, r.isError ? "" : r.content[0].text.slice(0, 180));
+  check("no stl file was left behind", !fs.existsSync(destStl));
 
   // 7) trellis_render_preview (clay, 4 frames)
-  console.log("\n7) trellis_render_preview (clay, 4 frames):");
-  r = await T.makeRenderTool(ctx).handler({ task_id: taskId, mode: "clay", nviews: 4 });
+  console.log("\n7) trellis_render_preview (solid, 4 frames):");
+  r = await T.makeRenderTool(ctx).handler({ task_id: taskId, mode: "solid", nviews: 4 });
   check("render is not an error", !r.isError, r.isError ? r.content[0].text : "");
   const rend = dataOf(r);
   const frames = rend.frames ?? [];
   check("produced at least one frame", frames.length >= 1, "frames=" + frames.length);
-  // nviews is a cap: render yields one data-url per image file in the
-  // entry's history outputs (the ComfyUI template's RenderMesh→SaveImage.)
-  check(frames.length <= 4, `frames bounded by nviews (got ${frames.length})`);
+  check("frame count is bounded by nviews", frames.length <= 4, "frames=" + frames.length);
 
   // 8) trellis_gallery
   console.log("\n8) trellis_gallery:");
@@ -409,7 +420,11 @@ async function main() {
     gal.items.some((i) => i.id === taskId),
     "contains_ours=" + gal.items.some((i) => i.id === taskId),
   );
-  check("every item has a thumbnail", gal.items.every((i) => !!i.thumbnail), "");
+  check(
+    "items carry a label instead of an inlined thumbnail",
+    gal.items.every((i) => i.thumbnail == null) && gal.items.some((i) => i.label === "a tiny test cube"),
+    JSON.stringify(gal.items.map((i) => i.label)),
+  );
 
   // 9) trellis_usage
   console.log("\n9) trellis_usage:");
@@ -425,6 +440,22 @@ async function main() {
     usage.last_task_id === taskId,
     "last=" + usage.last_task_id,
   );
+
+  console.log("\n9b) trellis_wait_task timeout_seconds is seconds:");
+  const tWait = Date.now();
+  r = await T.makeWaitTool(ctx).handler({ task_id: "stuck", timeout_seconds: 2 });
+  const waited = Date.now() - tWait;
+  check("explicit timeout is not treated as milliseconds", r.isError === true && /2s/.test(r.content[0].text) && waited >= 1500, r.content[0].text);
+
+  console.log("\n9c) seed 0 is preserved; resolution only hits the upsample target:");
+  const filled = fillImageTo3DWorkflow({ image: "x.png", resolution: 1536, seed: 0 });
+  check("seed 0 stays 0 on the shared samplers", filled["18"].inputs.seed === 0 && filled["23"].inputs.seed === 0, JSON.stringify({ a: filled["18"].inputs.seed, b: filled["23"].inputs.seed }));
+  check("1536 is the upsample target", filled["94"].inputs.target_resolution === 1536);
+  check("crop stays 1024", filled["312"].inputs.width === 1024 && filled["312"].inputs.height === 1024);
+
+  const views = buildSolidViewWorkflow({ modelFile: "m.glb", mode: "solid", nviews: 4, prefix: "3d/t" });
+  const yaws = ["r0", "r1", "r2", "r3"].map((id) => views.workflow[id].inputs["mode.angle_y"]);
+  check("four solid yaws are 0 90 180 270", JSON.stringify(yaws) === JSON.stringify([0, 90, 180, 270]), JSON.stringify(yaws));
 
   console.log(`\n=== SUMMARY: ${passed} passed, ${failed} failed ===`);
   console.log("Artifacts written under: " + outDir);

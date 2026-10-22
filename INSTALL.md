@@ -1,141 +1,161 @@
-# INSTALL — Trellis plugin for Hermes Agent
+# INSTALL — Trellis print plugin for Hermes Agent
 
-Full, end-to-end install: **DGX Spark** (ComfyUI + Trellis.2), **Mac**
-(MCP server + skill), **Hermes** (wire-up). Each step is independently
-runnable and verified.
+One photo in, a binary STL out. The GPU work runs on a machine that already
+has ComfyUI and Trellis.2. Hermes, the MCP server, and the STL file run on
+the computer you chat from (the Mac, in this setup).
 
----
+No cloud API and no subscription. The plugin does not start or stop ComfyUI.
+
+## Where each step runs
+
+| Step | Machine | Why |
+|---|---|---|
+| Trellis.2 image → textured GLB | GPU host, ComfyUI `:8188` | The Mac has no GPU. The weights and the 63-node graph live there. |
+| Four solid views (`RotateMesh`, `RenderMesh`) | Same GPU host | A few seconds on the GPU. The plugin uploads the GLB and reads the PNGs back. |
+| STL, OBJ, decimate, scale, hole fill | The Hermes machine | ComfyUI has no STL node. The GLB is already on this machine, and the path you asked for (`~/Desktop/part.stl`) is here too. Sending the mesh back to the GPU to run trimesh would upload it again and download it again. |
+| The agent | The Hermes machine | It calls the `trellis_*` tools. It does not SSH to the GPU host. |
+
+`trellis_start` does not boot ComfyUI. If health is down, start ComfyUI yourself on the GPU host.
 
 ## 0. Prerequisites
 
 | Where | Needed | Check |
 |---|---|---|
-| DGX Spark | ComfyUI **0.42** with the **Trellis-2 node classes** installed | `curl -s localhost:8188/system_stats` shows comfyui_version 0.42.0 |
-| DGX Spark | **Local safetensors** for the Trellis-2 pipeline (`trellis_2_int8_convrot`, `trellis_2_shape_vae_bf16`, `trellis_2_texture_vae_bf16`, `dino_v3_L_naf_fp32`, `birefnet`) | `GET /object_info` lists the node classes; the graph loads weights by filename (no HF token) |
-| Mac | Node **≥ 18** (Hermes wants 22; we need 18+) | `node -v` |
-| Mac | Reachability to the DGX over the tailnet | `ping <DGX-TAILNET-IP>` |
+| GPU host | ComfyUI **0.42** and the Trellis.2 nodes | `curl -s localhost:8188/system_stats` shows `comfyui_version` `0.42.0` |
+| GPU host | Local weights: `trellis_2_int8_convrot.safetensors`, `trellis_2_shape_vae_bf16.safetensors`, `trellis_2_texture_vae_bf16.safetensors`, `dino_v3_L_naf_fp32.safetensors`, `birefnet.safetensors` | `GET /object_info` lists `Trellis2ShapeStage`, `SaveGLB`, `RenderMesh`, `RotateMesh` |
+| Hermes machine | Node **≥ 18** | `node -v` |
+| Hermes machine | Python with `trimesh`. Face budgets also need `fast-simplification` | `python -c "import trimesh"` |
+| Hermes machine | Reachability to the GPU host | `curl -s http://<DGX-TAILNET-IP>:8188/system_stats` |
 
-> You already run ComfyUI on the Spark (Gradio `:7860`, separate from the
-> runtime we need). The plugin talks to standard ComfyUI API at `:8188` —
-> it does **not** run or manage ComfyUI itself.
+The Gradio app on `:7860` is a separate UI. This plugin talks to ComfyUI on `:8188`.
 
----
+## 1. GPU host — ComfyUI already running
 
-## 1. On the DGX — have the ComfyUI runtime ready
+The plugin only calls the API. It does not install weights or manage the process.
 
-ComfyUI 0.42 is the plugin's runtime; the plugin only calls its API.
+Nodes the print path uses:
+
+- Generation: `Trellis2Conditioning`, `Trellis2ShapeStage`, `Trellis2UpsampleStage`, `Trellis2TextureStage`, `VaeDecodeStructureTrellis2`, `VaeDecodeShapeTrellis`, `VaeDecodeTextureTrellis`, `EmptyTrellis2LatentStructure`, `VoxelToMesh`, `SaveGLB`
+- Preview: `Load3DAdvanced`, `Get3DComponents`, `RotateMesh`, `RenderMesh`, `SaveImage`
+
+Confirm from the GPU host:
 
 ```bash
-# 1a. ComfyUI 0.42.0 + the Trellis-2 node classes
-#     (Trellis2Conditioning · Trellis2ShapeStage · Trellis2TextureStage · ... ,
-#      plus VaeDecode*Trellis, EmptyTrellis2LatentStructure, VoxelToMesh,
-#      UNETLoader, VAELoader, KSampler, RenderMesh, SaveGLB/SaveImage).
-#     Weights are local safetensors loaded by filename (no HF token needed):
-#       trellis_2_int8_convrot.safetensors (UNet)
-#       trellis_2_shape_vae_bf16.safetensors / trellis_2_texture_vae_bf16.safetensors
-#       dino_v3_L_naf_fp32.safetensors (CLIP-vision) / birefnet.safetensors (bg removal)
-#     A `nodes.json` export listing the installed-template versions is the
-#     check: GET /object_info (or /api/object_info).
-
-# 1b. (Optional, for the legacy bridge) docker/trellis-api on :7861:
-#     cd docker && docker compose up -d trellis_bridge
-#     This is a **second runtime**; the plugin defaults to the ComfyUI one.
+curl -s localhost:8188/system_stats | head -c 300
 ```
 
-Verify:
-```bash
-curl -s localhost:8188/system_stats | head -c 300   # comfyui_version: "0.42.0", devices: ["cuda"]
-curl -s localhost:8188/api/models/diffusion_models # trellis_2_int8_convrot.safetensors
-```
+`model_loaded` in `trellis_health` stays false. ComfyUI loads Trellis weights on the first `/api/prompt` and does not report a resident-model flag.
 
----
-
-## 2. On the Mac — build the MCP server
+## 2. Hermes machine — MCP server and mesh tools
 
 ```bash
 cd hermes-trellis/mcp
-npm install          # @modelcontextprotocol/sdk, zod, typescript
-npm run build        # tsc → dist/  (strict, ES2022, Node16)
-npm run typecheck    # optional: tsc --noEmit
+npm install
+npm run build          # writes dist/  (dist/ is gitignored)
+npm run typecheck      # optional
 ```
 
-### Smoke-run it (stdio)
+Python for STL and decimation. Use whatever interpreter has trimesh, and point the server at it:
+
 ```bash
-node dist/index.js
-# [trellis-mcp] connected. bridge=http://<DGX-TAILNET-IP>:8188 out=...
-# (waits on stdin for JSON-RPC; Ctrl-C to quit)
+python3 -m pip install 'trimesh' 'fast-simplification'
+# confirm
+python3 -c "import trimesh, fast_simplification; print(trimesh.__version__)"
+python3 print_mesh.py self-test
 ```
 
-### End-to-end test (mock ComfyUI, no GPU)
+`self-test` builds a box, scales its longest axis to 100 mm, and checks `size == 84 + 50 * faces`.
+
+Without `fast-simplification`, a download with `face_budget` fails and names that package. The STL is still written if you omit the budget.
+
+Mock test, no GPU:
+
 ```bash
 cd hermes-trellis
 node tests/smoke.mjs
-# ... 24 passed, 0 failed ...
+# 29 passed, 0 failed
 ```
-The mock implements the ComfyUI API (`/system_stats`, `/upload/image`,
-`/api/prompt`, `/history/{id}` wrapper, `/history`, `/view`) and drives every
-tool the way the agent does — health → start → image_to_3d → task_status →
-wait_task → download → render → gallery → usage.
 
----
+The mock refuses to save a non-mesh as `.stl`. It does not prove a Spark generation.
 
-## 3. In Hermes — wire up the MCP server + skill
+## 3. Hermes — register the server and the skill
 
-### 3a. MCP server (`~/.hermes/config.yaml`)
+Put this in the **main** config, `~/.hermes/config.yaml`. An entry that exists only under `~/.hermes/profiles/<name>/config.yaml` never registers. Prefer `hermes config set … --force`. Direct writes are refused by the guard.
+
 ```yaml
 mcp_servers:
   trellis:
     command: node
     args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
     env:
-      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"   # ComfyUI (default :8188)
-      TRELLIS_BACKEND: "comfyui"                          # or "bridge" (:7861 legacy)
-      TRELLIS_OUT_DIR: "/absolute/path/to/hermes-trellis/trellis-out"
+      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"
+      TRELLIS_BACKEND: "comfyui"
+      TRELLIS_PYTHON: "/absolute/path/to/python"   # the interpreter from step 2
+      TRELLIS_OUT_DIR: "/absolute/path/to/trellis-out"
 ```
-Reload/restart Hermes so `mcp_servers.trellis` is discovered. Its tools
-(`trellis_health`, `trellis_image_to_3d`, …) appear alongside built-ins.
 
-### 3b. Skill
+`TRELLIS_PYTHON` defaults to `python3` on the MCP server's `PATH`. `TRELLIS_OUT_DIR` defaults to `<cwd>/trellis-out`.
+
 ```bash
 hermes skills install /absolute/path/to/hermes-trellis/skills/trellis-3d-generation
 ```
-The agent now reads SKILL.md — service-state-first, the ComfyUI
-image→3D pipeline, delivery, and troubleshooting.
 
-### 3c. Verify in Hermes
+Restart the gateway agent after the config change. MCP servers connect at startup. Reloading the UI is not enough.
+
 ```text
-hermes skills list                 # trellis-3d-generation present
-hermes tools list                  # trellis_* tools registered
+hermes skills list     # trellis-3d-generation
+hermes tools list      # trellis_health, trellis_image_to_3d, …
 ```
-Then a first chat turn: *"Check Trellis health."* → the agent calls
-`trellis_health` and reports up/model_loaded. If down: *"Start it."*
-`trellis_start` (GPU now in use).
 
----
+A first chat turn: "Check Trellis health." Up means ComfyUI answered. `busy: true` means `/queue` has a running job. Down means ComfyUI is not running. Start it on the GPU host. Do not expect `trellis_start` to do that.
 
-## 4. Desktop integration (optional)
+## 3b. Install as a Hermes plugin package
 
-Copy `desktop/plugin.py` into your Hermes desktop plugin path and register it.
-It surfaces the status bar, the in-chat preview (`MEDIA:`), and the gallery.
-Hook names may need a one-line match to your desktop SDK version (see
-`desktop/README.md`).
-
----
-
-## 5. Verify the whole thing
+The repo is also an Agent Plugin (`plugin.json`, `mcp.json`) plus a desktop half (`desktop/plugin.js`) and a file API (`dashboard/plugin_api.py`).
 
 ```bash
-# (DGX) ComfyUI runtime healthy
-curl -s <DGX-TAILNET-IP>:8188/system_stats | head -c 200
-
-# (Mac) MCP server + contract
-cd hermes-trellis && node tests/smoke.mjs        # 24/24
-
-# (Hermes) a real round trip
-#   "Trellis: make a 3D model of [image] at 1024, STL to ~/Desktop/x.stl,
-#    show me a clay render."
-#   -> task completes, x.stl written, clay frame shown in chat.
+# from a checkout, so Desktop reloads when desktop/plugin.js changes
+ln -s /absolute/path/to/hermes-trellis ~/.hermes/plugins/trellis
+hermes plugins enable trellis
 ```
 
-When all three are green you have a working, local, image→STL/3D pipeline for
-Hermes — the Meshy feature set, on your own model.
+Then in Desktop: Capabilities → Plugins → enable the Trellis desktop half, and Rescan if the orbit card does not appear. Settings → Plugins → Trellis holds the ComfyUI URL, the Python path, and the output folder.
+
+Build `mcp/dist` before enabling. The server command is `node ${PLUGIN_ROOT}/mcp/dist/index.js`.
+
+With the desktop half on, the agent puts this in its own paragraph after a download:
+
+```text
+::trellis-model{glb="/absolute/model.glb" stl="/absolute/model.stl"}
+```
+
+That card orbits the GLB. The status chip reads ComfyUI through `/api/plugins/trellis/status`. `trellis_wait_task` and `trellis_render_preview` emit MCP progress notifications while the Spark job runs. `provenance.json` in the output folder records the photo path, seed, resolution, STL path, face count, and watertight flag.
+
+## 4. Desktop status script (no UI)
+
+`desktop/plugin.py` reads `/system_stats`, `/queue`, and `/history`. It does not generate and it does not render. Preview PNGs come from `trellis_render_preview` and are shown with `MEDIA:<path>`.
+
+```bash
+TRELLIS_API_URL=http://<DGX-TAILNET-IP>:8188 python desktop/plugin.py
+```
+
+A live ComfyUI prints `running: True` and a count of Trellis history rows. Hook names for the desktop SDK are in `desktop/README.md`.
+
+## 5. A real print
+
+On the GPU host, ComfyUI is up. On the Hermes machine:
+
+> "Make a printable STL of this photo at 1024, 10 cm tall, about 20k faces, and show me four solid views."
+
+The agent should:
+
+1. `trellis_health`
+2. `trellis_image_to_3d` (resolution changes the upsample target only; crop and UV stay at 1024)
+3. `trellis_wait_task` (`timeout_seconds` is seconds)
+4. `trellis_download` format `glb`
+5. `trellis_render_preview` mode `solid`, `nviews` 4 — four PNGs, four different sha256 values
+6. `trellis_download` format `stl` with `face_budget`, `height_mm`, and `repair`
+
+The STL report includes face count, extents, and watertight before and after repair. Open it in the slicer. The solid views show shape, not manifold status.
+
+There is no text-to-3D on this ComfyUI (no text checkpoint). A request with no photo gets a request for a photo. Rigging and animation are out of scope.

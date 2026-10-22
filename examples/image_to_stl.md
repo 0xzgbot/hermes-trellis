@@ -5,39 +5,33 @@ slicer or the foundry.
 
 ## What you say to the agent
 
-> "Make a 3D model of this photo of a bison at 1024, reduce it to about
-> 20k faces, and save the STL to ~/Desktop/bison.stl. Then show me a clay
-> render so I can check the shape."
+> "Make a printable STL of this bison photo at 1024, about 20k faces, 10 cm
+> tall, and show me four solid views."
 
 ## What the agent does (the pipeline)
 
 ```
-1. trellis_health            # up? model_loaded? busy?
-2. trellis_start               # (only if down; GPU now in use)
-3. trellis_image_to_3d          # submit: image, resolution=1024, seed,
-                                        #   label="a bison" -> task_id
-4. trellis_wait_task(task_id)   # block until completed
-5. **Local GLB → STL conversion** (no GPU): `trimesh.load(glb, force="mesh")`
-   → optional `simplify_quadric_decimation(face_count=20000)` →
-   `export(file_type="stl")`; verify `size == 84 + 50·face_count`.
-6. trellis_download(format="glb", dest="~/Desktop/bison.glb")  # server's only export
-7. trellis_render_preview(mode="clay", nviews=8)
-8. MEDIA: .../clay_00.png        # shown inline in chat
+1. trellis_health
+2. trellis_image_to_3d            # image, resolution=1024, seed, label
+3. trellis_wait_task
+4. trellis_download format=glb
+5. trellis_render_preview mode=solid nviews=4
+6. trellis_download format=stl dest=~/Desktop/bison.stl face_budget=20000 height_mm=100 repair=true
+7. MEDIA: the four solid frames
 ```
+
+The STL step checks `size == 84 + 50 * faces`. Report watertight before and after repair.
 
 ## What you get
 
-- `~/Desktop/bison.stl` — a binary STL (~20k faces), slice-ready.
-- An inline **clay render** in chat (pure geometry, no texture) so you can
-  eyeball the silhouette before committing.
-- The model is logged in the **gallery** (label "a bison", timestamp, formats).
-- `trellis_usage` now shows one more model + a few more GPU-seconds.
+- The STL path you named. Face count, byte size, extents, and watertight before and after repair.
+- Four solid PNGs, each with its own sha256. Show them with `MEDIA:`.
+- A gallery row with the label and time. Usage counts one more Trellis run and its GPU seconds.
 
 ## Good to know
 
 - **STL is geometry-only** — no PBR. If you want the textured asset too,
   download `format="glb"` as well (it's the native, full-fidelity output).
-- **Check watertightness** in your slicer/CAD if the model is for casting —
-  the render shows shape, not manifold status.
+- The solid views show shape. The watertight flag is the manifold report. Open the STL in the slicer either way.
 - The **face budget** is a print-size knob: tighter = smaller file + faster
   slice, looser = more detail. Start ~20k and adjust.

@@ -8,29 +8,24 @@ produced by a local GLB→STL conversion. It is the faithful analogue of the
 chat, status bar, gallery) — but it runs **Trellis** (an open, local image→3D
 model) instead of Meshy's proprietary cloud.
 
-> **Why "another image→STL model":** Meshy is a cloud 3D service (you pay
-> credits, it runs their model). Here the model runs **on your GPU** (Trellis.2),
-> you own the whole pipeline, and the headline output for makers is an
-> **STL** (print/cast). Swap the model by pointing `TRELLIS_MODEL_ID` at a
-> different image→3D checkpoint that speaks the same pipeline.
-
-> **Export reality check:** the ComfyUI runtime emits **GLB only** (`SaveGLB`).
-> There are **no STL/OBJ/FBX/USDZ nodes** on it, so `trellis_download(format=…)`
-> returns GLB for any format. For **STL**, convert the GLB **locally** (the skill
-> carries the trimesh recipe) — no GPU needed for the conversion.
+The GPU host runs Trellis.2 and the four solid views. The Hermes machine
+runs the agent, the MCP server, and trimesh. ComfyUI writes a GLB. `trellis_download`
+with `format: "stl"` converts that GLB on the Hermes machine and checks
+`size == 84 + 50 * faces`. There is no `TRELLIS_MODEL_ID` switch. The graph
+loads `trellis_2_int8_convrot.safetensors` by name.
 
 ## What it gives you
 
 | Feature | Detail |
 |---|---|
 | **Image → 3D** | One conditioning image → a textured 3D asset. The core (Trellis has no text-to-3D / multi-view). |
-| **PBR texturing** | Baked into image→3D (base color, roughness, metallic). `trellis_texturize` re-runs the generation job. |
-| **Decimation + remesh** | Local (trimesh). `trellis_remesh_decimate` is legacy-bridge-only — not on the default `comfyui` backend. |
-| **Export** | **GLB** (full PBR, first-class — the server's only export). **STL** via local GLB→STL conversion; OBJ/FBX/USDZ are not produced by this runtime. |
-| **HDRI render preview** | Frames / turntable under neutral, clay, base-color, or forest/sunset/courtyard lighting. |
+| **PBR texturing** | Baked into image→3D. `trellis_texturize` re-runs that job. It does not recolor an existing GLB. |
+| **Decimation** | Local trimesh (`trellis_remesh_decimate`). Default 200k faces. Hole fill when `remesh` is true. |
+| **Export** | **GLB** from ComfyUI. **STL** and **OBJ** via local trimesh. The STL byte size is checked. FBX and USDZ are refused. |
+| **Print preview** | Four solid `RenderMesh` views (0/90/180/270). Modes: auto, texture, vertex colors, solid, normal, depth. |
 | **Task mgmt** | Submit (async) → poll / wait → download. Long GPU jobs without blocking chat. |
-| **Gallery** | Every model you've made (thumbnails, labels, timestamps), survives restarts. |
-| **Usage / "credits"** | How many models, ~GPU-seconds, last task — local "cost" framing. |
+| **Gallery** | Trellis runs only, newest first, with label and time. No inlined textures. Pictures come from `trellis_render_preview`. |
+| **Usage** | Count of those runs, real GPU seconds from ComfyUI timestamps, newest task. Not a credit balance. |
 | **MCP tools** | 11 `trellis_*` tools (health, start, image_to_3d, task_status, wait, download, render, texturize, remesh, gallery, usage). |
 | **Skill** | `trellis-3d-generation` teaches the agent the pipeline, service-state-first rule, and delivery. |
 | **Desktop integration** | Rendered preview in chat (`MEDIA:`), status bar, gallery panel. |
@@ -51,10 +46,11 @@ Hermes agent (Mac)                          DGX Spark
 │   (upload + POST /api/     │        │  UpsampleStage · VoxelToMesh · SaveGLB/    │
 │    prompt)                 │        │  SaveImage + RenderMesh).                   │
 │   /history/{id} (unwrap)   │        │                                          │
-│   /view · /upload/image    │        │  one job = upload image → fill graph →       │
-└───────────────┬──────────────┘        │  POST /api/prompt → wait → /view files     │
-                │                        │  (GLB + preview PNG) → export/download     │
-                ▼                        └─────────────────────────────────────────┘
+│   /view · /upload/image    │        │  image → /api/prompt → /view GLB            │
+│   print_mesh.py (trimesh)  │        │  then Load3D + RenderMesh for 4 solid views │
+└───────────────┬──────────────┘        └─────────────────────────────────────────┘
+                │ GLB bytes come back; STL is written here
+                ▼
         skills/trellis-3d-generation   ← how the agent uses the tools
 
 Optional legacy front (kept for existing docker-bridge deployments):
@@ -77,13 +73,16 @@ hermes-trellis/
 ├── README.md                  # this file
 ├── INSTALL.md                   # full install (DGX + Mac + Hermes)
 ├── docker/                          # (optional legacy bridge — kept, not required)
-├── mcp/                           # MCP server (Node/TS)
+├── mcp/
+│   ├── print_mesh.py                # trimesh STL, decimate, scale, repair
 │   ├── package.json / tsconfig.json
 │   └── src/
-│       ├── bridge.ts              # typed client → ComfyUI (default)  / legacy bridge
-│       ├── workflow-image-to-3d.ts  # the image→3D ComfyUI graph template
-│       ├── tools.ts                 # the trellis_* tools
-│       └── index.ts               # stdio server, registers the tools
+│       ├── bridge.ts                # ComfyUI client
+│       ├── workflow-image-to-3d.ts  # image→3D graph
+│       ├── workflow-render.ts       # four solid views
+│       ├── print-mesh.ts            # spawns print_mesh.py
+│       ├── tools.ts
+│       └── index.ts
 ├── skills/trellis-3d-generation/
 │   ├── SKILL.md                    # the skill (frontmatter + pipeline)
 │   └── references/  setup.md · pipelines.md · delivery.md · troubleshooting.md
@@ -91,7 +90,7 @@ hermes-trellis/
 │   ├── plugin.py                    # status bar, chat preview, gallery
 │   └── README.md
 ├── tests/
-│   └── smoke.mjs                     # 24/24 end-to-end mock suite (no GPU)
+│   └── smoke.mjs                     # mock ComfyUI suite (no GPU)
 ```
 
 ## Quick start
@@ -127,36 +126,31 @@ mcp_servers:
     command: node
     args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
     env:
-      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"   # ComfyUI (default :8188)
-      TRELLIS_OUT_DIR: "/absolute/path/to/hermes-trellis/trellis-out"
+      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"
+      TRELLIS_PYTHON: "/absolute/path/to/python"   # trimesh [+ fast-simplification]
+      TRELLIS_OUT_DIR: "/absolute/path/to/trellis-out"
 ```
 ```bash
 hermes skills install /absolute/path/to/hermes-trellis/skills/trellis-3d-generation
 ```
 
 **4. Use it.** In chat:
-> *"Make a 3D model of this [image] at 1024, save the STL to
-> ~/Desktop/bison.stl, and show me a clay render."*
+> *"Make a printable STL of this photo at 1024, 10 cm tall, about 20k faces, and show me four solid views."*
 
-The agent: `trellis_health` → `trellis_start` if down → `trellis_image_to_3d`
-→ `trellis_wait_task` → `trellis_download(glb)` → **local GLB→STL conversion**
-→ `trellis_render_preview(clay)` → shows `MEDIA:` preview and the `.stl` path.
+The agent: `trellis_health` → `trellis_image_to_3d` on the GPU host →
+`trellis_wait_task` → download the GLB → `trellis_render_preview` (four solid
+views, also on the GPU host) → `trellis_download` format `stl` on this machine.
 
 ## Testing
 
 Two tiers of real, executed checks:
 
 - **MCP ↔ ComfyUI contract (on the Mac, no GPU):** `tests/smoke.mjs` spins up
-  an in-process mock of the ComfyUI API (`/system_stats`, `/upload/image`,
-  `/api/prompt`, `/history/{id}` wrapper, `/history`, `/view`) and drives every
-  tool end-to-end. **24/24 pass**, writing real glTF/PNG bytes to disk.
+  an in-process mock of the ComfyUI API and drives the print tools. A fake GLB must not be saved as an STL. `mcp/print_mesh.py self-test` checks a real box mesh.
   ```bash
   cd hermes-trellis && node tests/smoke.mjs
   ```
-- **Conversion half (real files, on the DGX or a local venv):** `docker/trellis-api/convert.py`
-  is exercised with real trimesh — a 128-face GLB → byte-exact binary STL
-  (84 + 50×128 B), quadric decimate, OBJ export. `store.py`/render behavior
-  tested there.
+- **STL byte check:** `TRELLIS_PYTHON=/path/to/python mcp/print_mesh.py self-test` builds a box, scales its longest axis to 100 mm, and checks `size == 84 + 50 * faces`.
 
 The **model half** (Trellis.2 actually generating the mesh) runs only on the
 DGX GPU; the plumbing around it is what's proven here.
@@ -168,7 +162,8 @@ DGX GPU; the plumbing around it is what's proven here.
 | `TRELLIS_API_URL` | Mac | Runtime base URL (ComfyUI default). | `http://127.0.0.1:8188` |
 | `TRELLIS_BACKEND` | Mac | Front the MCP client drives: `comfyui` (default, standard ComfyUI :8188) or `bridge` (legacy FastAPI :7861). | `comfyui` |
 | `TRELLIS_BRIDGE_URL` | Mac | Legacy bridge base (`http://<DGX>:7861`); only used when backend=bridge. | `http://127.0.0.1:7861` |
-| `TRELLIS_OUT_DIR` | Mac | Where downloads/renders land when the caller omits a path. | `<repo>/mcp/trellis-out` |
+| `TRELLIS_PYTHON` | Mac | Python used for STL/OBJ. It must import trimesh. | `python3` |
+| `TRELLIS_OUT_DIR` | Mac | Where downloads/renders land when the caller omits a path. | `<cwd>/trellis-out` |
 
 > Dual-backend note: the ComfyUI transport is the default and the only one the
 > plugin ships with in `dist/`. The legacy FastAPI bridge keeps working behind
@@ -181,24 +176,22 @@ DGX GPU; the plumbing around it is what's proven here.
   `:8188`, legacy bridge `:7861` — don't mix them up.
 - **404 on `/api/prompt` or `/upload/image`** → not pointing at ComfyUI
   (backend=comfyui); the runtime may have been restarted with different ports.
-- **Model not loaded** → `model_loaded` flips to true on the first
-  `/api/prompt` (each workflow loads the Trellis.2 UNet/VAEs). Give the first
-  model a quiet window to load.
-- **OOM at 1536** → drop to 1024/512, or free GPU (stop LLM serving).
-- **Decimation no-op** → install `fast-simplification` / match trimesh API.
-- **STL export is only geometry** → STL is derived from the final GLB; for
-  print/cast, open the STL in a slicer/CAD to check watertightness.
+- **`model_loaded` is false while jobs succeed** → expected. ComfyUI does not
+  report a resident Trellis flag. `busy` comes from `/queue`.
+- **`trellis_start` did not boot ComfyUI** → it only checks `/system_stats`.
+  Start ComfyUI on the GPU host.
+- **OOM at 1536** → drop to 1024 or 512, or free the GPU.
+- **`fast-simplification` missing** → `face_budget` fails. Install it in
+  `TRELLIS_PYTHON`, or omit the budget and slice the full mesh.
+- **STL is geometry only** → open it in the slicer. The tool reports watertight.
 
 ## Relationship to the Meshy plugin
 
-`hermes-trellis` is the **local, model-owning counterpart** of the official
-Meshy plugin (`@meshy-ai/meshy-mcp-server@0.6.4` in
-`NousResearch/hermes-official-plugins`): same Hermes MCP + Skill + Desktop
-shape, same catalog plugin entry shape, but the runtime is yours (Trellis.2 on
-your DGX) and credit-free. Obvious deltas, stated when asked: Meshy ships
-text→3D, multi-view, rig/animations and a print pipeline; Trellis.2 here is
-**image-conditioned** and **3D-only** — the agent will generate a conditioning
-image first if given a description. Both coexist in the same Hermes install.
+`hermes-trellis` is a local print pipeline. The official Meshy plugin
+(`@meshy-ai/meshy-mcp-server@0.6.5`) is a cloud service with text-to-3D,
+rigging, and animation. This plugin does none of those. It needs a photo.
+There is no text checkpoint on the ComfyUI install this was built against,
+so the agent asks for an image instead of inventing one.
 
 ## License
 

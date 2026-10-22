@@ -55,57 +55,65 @@ def _fetch(path: str, timeout: float = 8.0) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _is_trellis(graph: Any) -> bool:
+    if not isinstance(graph, dict):
+        return False
+    for node in graph.values():
+        if isinstance(node, dict) and node.get("class_type") in ("Trellis2ShapeStage", "Trellis2UpsampleStage"):
+            return True
+    return False
+
+
+def _rows() -> List[Dict[str, Any]]:
+    hist = _fetch("/history", timeout=30) or {}
+    if not isinstance(hist, dict):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for pid, entry in hist.items():
+        if not isinstance(entry, dict):
+            continue
+        prompt = entry.get("prompt")
+        graph = prompt[2] if isinstance(prompt, list) and len(prompt) > 2 else None
+        extra = prompt[3] if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict) else {}
+        if not _is_trellis(graph):
+            continue
+        created = extra.get("create_time")
+        rows.append({
+            "id": pid,
+            "label": extra.get("label"),
+            "created_at": created,
+            "model_id": "microsoft/TRELLIS.2-4B",
+        })
+    rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    return rows
+
+
 def service_state() -> Dict[str, Any]:
-    """Status-bar payload: is Trellis up, is a job running, usage."""
-    h = _fetch("/health") or {}
-    u = _fetch("/usage") or {}
+    """Status-bar payload from ComfyUI /system_stats, /queue, and /history."""
+    stats = _fetch("/system_stats")
+    queue = _fetch("/queue") or {}
+    running_jobs = queue.get("queue_running") if isinstance(queue, dict) else None
+    rows = _rows()
     return {
-        "running": bool(h.get("up")),
-        "model_loaded": bool(h.get("model_loaded")),
-        "busy": bool(h.get("busy")),
-        "model_id": h.get("model_id", "microsoft/TRELLIS.2-4B"),
-        "models_generated": int(u.get("total_generated", 0) or 0),
-        "gpu_seconds": float(u.get("gpu_seconds_estimate", 0) or 0),
-        "last_task_at": u.get("last_task_at"),
+        "running": stats is not None,
+        "model_loaded": False,
+        "busy": bool(running_jobs),
+        "model_id": "microsoft/TRELLIS.2-4B",
+        "models_generated": len(rows),
+        "gpu_seconds": None,
+        "last_task_at": rows[0]["created_at"] if rows else None,
     }
 
 
 def gallery(limit: int = 24) -> List[Dict[str, Any]]:
-    """Gallery panel payload: recent generated models + thumbnails."""
-    g = _fetch("/gallery?limit=%d" % limit) or {}
-    return g.get("items", [])
+    """Recent Trellis runs. No image bytes — render previews come from the MCP tool."""
+    return _rows()[:limit]
 
 
-def render_frame(task_id: str, mode: str = "normal", out: Optional[str] = None) -> Optional[str]:
-    """
-    Fetch a rendered preview frame for a completed task and write it to
-    disk (so the desktop app can display it via MEDIA:). Returns the
-    absolute path, or None.
-    """
-    import base64
-    r = _fetch("/tasks/%s/render" % task_id, timeout=30) if False else None
-    # POST render:
-    import urllib.request
-    try:
-        req = urllib.request.Request(
-            API_URL + "/tasks/%s/render" % task_id,
-            data=json.dumps({"mode": mode, "nviews": 1}).encode(),
-            headers={"content-type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = json.loads(resp.read().decode())
-        imgs = body.get("images") or []
-        if not imgs:
-            return None
-        # First image is a data:URL.
-        data = imgs[0]
-        b64 = data.split(",", 1)[1] if data.startswith("data:") else data
-        png = base64.b64decode(b64)
-        dest = Path(out) if out else OUT_DIR / ("%s_%s.png" % (task_id, mode))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(png)
-        return str(dest.resolve())
-    except Exception:
-        return None
+def render_frame(task_id: str, mode: str = "solid", out: Optional[str] = None) -> Optional[str]:
+    """Previews are written by trellis_render_preview. This hook does not invent one."""
+    del task_id, mode, out
+    return None
 
 
 # ----------------------------------------------------------------------------

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "trellis",
+  "version": "0.2.0",
+  "description": "Local image-to-print. Trellis.2 on your ComfyUI GPU turns one photo into a GLB. The Hermes machine writes a checked binary STL. No cloud API, no subscription, no rigging, no animation.",
+  "license": "MIT",
+  "keywords": ["trellis", "3d", "image-to-3d", "stl", "3d-printing", "comfyui", "mcp"],
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "trellis": {
+          "trust": "untrusted"
+        }
+      },
+      "config_schema": {
+        "comfy_url": {
+          "type": "str",
+          "env": "TRELLIS_API_URL",
+          "label": "ComfyUI URL",
+          "description": "Base URL of ComfyUI on the GPU machine, for example http://<DGX-TAILNET-IP>:8188."
+        },
+        "python": {
+          "type": "str",
+          "env": "TRELLIS_PYTHON",
+          "label": "Python for STL",
+          "description": "Interpreter with trimesh and fast-simplification. Empty uses python3 on PATH."
+        },
+        "out_dir": {
+          "type": "str",
+          "env": "TRELLIS_OUT_DIR",
+          "label": "Output folder",
+          "description": "Where GLBs, STLs, and provenance.json are written when a tool call omits a path."
+        }
+      }
+    }
+  }
+}
