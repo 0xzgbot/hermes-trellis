@@ -1,28 +1,33 @@
+#!/usr/bin/env node
 /**
- * smoke.mjs — end-to-end test of the Trellis MCP tool surface.
+ * smoke.mjs — end-to-end test of the Trellis MCP tool surface against a mock
+ * of the DGX **ComfyUI** backend (default `TRELLIS_BACKEND=comfyui`, Trellis.2
+ * running inside standard ComfyUI 0.42 on the DGX at :8188).
  *
- * Spins up an in-process mock of the DGX "bridge" REST front
- * (the FastAPI that wraps the real Trellis2 pipeline), points a
- * TrellisBridgeClient at it, and drives every tool the way a
- * Hermes agent would:
+ * Spins up an in-process mock of the ComfyUI endpoints:
+ *   GET  /system_stats           → liveness
+ *   POST /upload/image           → multipart image upload
+ *   POST /api/prompt             → { client_id, prompt, output, extra_data } → { prompt_id }
+ *   GET  /history/{id}           → WRAPPER { [id]: entry } (we unwrap it)
+ *   GET  /history                → flat map { [id]: entry }
+ *   GET  /view?filename&subfolder&type → binary output
+ * and drives every MCP tool the way a Hermes agent would:
+ *   health → start → image_to_3d(submit) → task_status → wait_task →
+ *   download → render_preview → gallery → usage
  *
- *   health -> start -> image_to_3d(submit) -> task_status ->
- *   wait_task -> download(STL) -> render(clay) -> gallery -> usage
- *
- * The mock is STATEFUL: each /tasks/:id poll advances the task's
- * progress and flips it to "completed" after a few polls, so the
- * wait loop observes a real pending -> running -> completed
- * transition with no timers/flake. This proves the full
- * MCP<->bridge contract on the Mac without a GPU.
+ * The mock is STATEFUL: each /history/{id} poll advances the task's progress
+ * and flips it to "completed" after a few polls, so the wait loop observes a
+ * real pending → running → completed transition with no timers/flake. This
+ * proves the full MCP ↔ ComfyUI contract on the Mac without a GPU.
  *
  * NOTE on result shape: every tool returns
  *   { content: [{type:"text", text}], structuredContent: {...} }
  * where `text` may carry a human note line ahead of the JSON, and
- * `structuredContent` is the clean machine-readable object. Tests
- * therefore read `structuredContent` via dataOf(r), never re-parse the
- * human text.
+ * `structuredContent` is the clean machine-readable object. Tests read
+ * `structuredContent` via dataOf(r), never re-parse the human text.
  *
  * Run:  node tests/smoke.mjs        (from the repo root)
+ * Repo: https://github.com/0xzgbot/hermes-trellis
  */
 
 import http from "node:http";
@@ -38,6 +43,7 @@ const T = await import("../mcp/dist/tools.js");
 const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const TINY_PNG_DATAURL = `data:image/png;base64,${TINY_PNG_B64}`;
+const TINY_PNG_BYTES = Buffer.from(TINY_PNG_B64, "base64");
 
 /** Read the clean machine object from a tool result (never re-parse human text). */
 function dataOf(r) {
@@ -56,16 +62,73 @@ function dataOf(r) {
   }
 }
 
-// --------------------------------------------------------------------------
-// Mock DGX bridge (FastAPI stand-in)
-// --------------------------------------------------------------------------
-function startMockBridge() {
-  const tasks = new Map(); // id -> {id,status,progress,queries,label,formats,sizes,...}
+// ---------------------------------------------------------------------------
+// Mock ComfyUI backend (the DGX :8188 path — Trellis.2 node classes are
+// loaded in-process by ComfyUI; the mock only provides the API).
+// ---------------------------------------------------------------------------
+function startMockComfyUI() {
+  const tasks = new Map(); // id -> task state
   const gallerySeed = [
-    { id: "g-seed-1", label: "a bronze bison", created_at: "2026-10-18T12:00:00Z", model_id: "microsoft/TRELLIS.2-4B", formats: ["glb", "stl"], thumbnail: TINY_PNG_DATAURL, input_image: TINY_PNG_DATAURL },
-    { id: "g-seed-2", label: "terrain record weight", created_at: "2026-10-19T09:30:00Z", model_id: "microsoft/TRELLIS.2-4B", formats: ["glb", "stl"], thumbnail: TINY_PNG_DATAURL, input_image: TINY_PNG_DATAURL },
+    {
+      id: "g-seed-1",
+      label: "a bronze bison",
+      created_at: "2026-10-18T12:00:00Z",
+      model_id: "microsoft/TRELLIS.2-4B",
+      formats: ["glb", "png"],
+      thumbnail: TINY_PNG_DATAURL,
+      input_image: TINY_PNG_DATAURL,
+    },
+    {
+      id: "g-seed-2",
+      label: "terrain record weight",
+      created_at: "2026-10-19T09:30:00Z",
+      model_id: "microsoft/TRELLIS.2-4B",
+      formats: ["glb", "png"],
+      thumbnail: TINY_PNG_DATAURL,
+      input_image: TINY_PNG_DATAURL,
+    },
   ];
-  const usage = { total_generated: 2, gpu_seconds_estimate: 58, credits_used: 2, last_task_id: "g-seed-2", last_task_at: "2026-10-19T09:30:00Z" };
+  const usage = {
+    total_generated: 2,
+    gpu_seconds_estimate: 58,
+    credits_used: 2,
+    last_task_id: "g-seed-2",
+    last_task_at: "2026-10-19T09:30:00Z",
+  };
+
+  // One task record, carrying the ComfyUI-flavoured outputs the pipeline's
+  // SaveGLB / SaveImage nodes leave behind.
+  function makeTask(id, statusStr = "pending", progress = 0, label) {
+    return {
+      id,
+      status_str: statusStr,
+      status: statusStr,
+      progress,
+      queries: 0,
+      label: label || undefined,
+      image: null,
+      resolution: 1024,
+      formats: ["glb", "png"],
+      sizes: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      finished_at: null,
+      error: null,
+      model_id: "microsoft/TRELLIS.2-4B",
+      preview: TINY_PNG_DATAURL,
+      outputs: {
+        "24": {
+          images: [
+            { filename: "stage1_raw.glb", subfolder: "3d", type: "output" },
+            { filename: "final_model.glb", subfolder: "3d", type: "output" },
+          ],
+        },
+        "55": {
+          images: [{ filename: "preview.png", subfolder: "", type: "output" }],
+        },
+      },
+    };
+  }
 
   const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, "http://mock");
@@ -80,79 +143,137 @@ function startMockBridge() {
         req.on("data", (c) => (b += c));
         req.on("end", () => resolve(b));
       });
+
     try {
-      if (req.method === "GET" && p === "/health") {
-        const anyRunning = [...tasks.values()].some((t) => t.status === "running");
-        return send(200, { up: true, model_loaded: true, busy: anyRunning, gpu_free_gb: 42, model_id: "microsoft/TRELLIS.2-4B", url: "http://127.0.0.1:7861", app_script: "app.py", note: "healthy" });
-      }
-      if (req.method === "POST" && p === "/start") {
-        return send(200, { ok: true, up: true, model_loaded: true, waited_ms: 1200, note: "pipeline loaded into GPU" });
-      }
-      if (req.method === "POST" && p === "/generate") {
-        const b = JSON.parse((await readBody()) || "{}");
-        const id = "t-" + Math.random().toString(36).slice(2, 10);
-        tasks.set(id, {
-          id, status: "pending", progress: 0, queries: 0, label: b.label || undefined,
-          image: b.image, resolution: b.resolution ?? 1024,
-          formats: ["glb", "stl", "obj", "fbx", "usdz"], sizes: null,
-          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-          finished_at: null, error: null, model_id: "microsoft/TRELLIS.2-4B", preview: TINY_PNG_DATAURL,
+      // 1) liveness — ComfyUI says it is up via /system_stats
+      if (req.method === "GET" && p === "/system_stats") {
+        return send(200, {
+          system: { os: "linux" },
+          devices: ["cuda"],
+          comfyui_version: "0.42.0",
         });
-        usage.total_generated += 1; usage.credits_used += 1; usage.gpu_seconds_estimate += 14;
-        usage.last_task_id = id; usage.last_task_at = new Date().toISOString();
-        return send(200, { id, status: "pending" });
       }
-      let m = req.method === "GET" ? p.match(/^\/tasks\/([^/]+)$/) : null;
+
+      // 2) image upload (multipart form, field "image") → server-side name
+      if (req.method === "POST" && p === "/upload/image") {
+        const size = await new Promise((resolve) => {
+          let n = 0;
+          req.on("data", (c) => (n += c.length));
+          req.on("end", () => resolve(n));
+        });
+        const name = `cond_${Date.now() % 100000}.png`;
+        return send(200, { name, subfolder: "", type: "output" });
+      }
+
+      // 3) queue the filled workflow graph.
+      //    Contract under test: POST /api/prompt { client_id, prompt, output, extra_data }
+      //    The mock records the graph; a subsequent /history/{id} poll promotes
+      //    this task from pending → running → completed.
+      if (req.method === "POST" && p === "/api/prompt") {
+        const raw = await readBody();
+        let body;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          return send(400, { error: "bad json" });
+        }
+        if (!body || typeof body !== "object" || !body.prompt || !Array.isArray(body.output)) {
+          return send(400, { error: "missing prompt/output" });
+        }
+        const pid = `pid_${tasks.size + 1}_${Date.now().toString(36)}`;
+        const task = makeTask(pid, "executing", 0.05, body.extra_data?.label);
+        task.image = body.extra_data?.seed;
+        tasks.set(pid, task);
+        usage.total_generated += 1;
+        usage.credits_used += 1;
+        usage.last_task_id = pid;
+        usage.last_task_at = new Date().toISOString();
+        return send(200, { prompt_id: pid, number: tasks.size });
+      }
+
+      // 4) single-task history: WRAPPED as { [id]: entry }
+      let m = req.method === "GET" ? p.match(/^\/history\/([^/]+)$/) : null;
       if (m) {
         const id = decodeURIComponent(m[1]);
         const t = tasks.get(id);
         if (!t) return send(404, { detail: `no such task ${id}` });
-        t.queries += 1; t.updated_at = new Date().toISOString();
-        if ((t.status === "pending" || t.status === "queued") && t.queries >= 1) { t.status = "running"; t.progress = 0.15; }
-        if (t.status === "running" && t.queries >= 3) {
-          t.status = "completed"; t.progress = 1; t.finished_at = new Date().toISOString();
-          t.sizes = { glb: 1048576, stl: 524288, obj: 630784, fbx: 917504, usdz: 1048576 };
+        t.queries += 1;
+        t.updated_at = new Date().toISOString();
+        // Stateful advance, mirroring ComfyUI: freshly queued task becomes
+        // "executing" (queries>=1); after enough polls it reaches "success".
+        if (t.status_str === "pending" && t.queries >= 1) {
+          t.status_str = "executing";
+          t.progress = 0.2;
         }
-        return send(200, t);
+        if (t.status_str === "executing" && t.queries >= 2) {
+          t.status_str = "success";
+          t.progress = 1;
+          t.finished_at = new Date().toISOString();
+          t.sizes = { glb: 1048576, png: 64 };
+        }
+        const entry = {
+          prompt: { note: "mock comfyui workflow" },
+          status: { status_str: t.status_str, messages: [["status", t.status_str]] },
+          outputs: t.outputs,
+          extra_data: t.label ? { label: t.label } : {},
+          created_at: t.created_at,
+          updated_at: t.updated_at,
+          finished_at: t.finished_at,
+        };
+        // ComfyUI contract: key the wrapper by the prompt id.
+        return send(200, { [id]: entry });
       }
-      m = p.match(/^\/tasks\/([^/]+)\/download$/);
-      if (req.method === "GET" && m) {
-        const id = decodeURIComponent(m[1]);
-        const t = tasks.get(id);
-        if (!t) return send(404, { detail: `no such task ${id}` });
-        const fmt = (u.searchParams.get("format") || "glb").toLowerCase();
-        if (!t.formats.includes(fmt)) return send(415, { detail: `format ${fmt} not available for ${id}` });
-        const magic = { glb: "glTF", stl: "solid ", obj: "#obj  ", fbx: "Kaydara", usdz: "usdz!!" }[fmt] || "DATA";
-        const payload = Buffer.concat([Buffer.from(magic, "utf8"), Buffer.alloc(Math.max(64, 256 - magic.length), 0x42)]);
-        res.writeHead(200, { "content-type": fmt === "stl" ? "model/stl" : fmt === "glb" ? "model/gltf-binary" : "application/octet-stream", "content-length": payload.length });
-        return res.end(payload);
+
+      // 5) full history: FLAT map { [id]: entry } — gallery + usage consume this.
+      if (req.method === "GET" && p === "/history") {
+        const out = {};
+        for (const [id, t] of tasks) {
+          if (t.status_str !== "success") continue; // not finished yet
+          out[id] = {
+            prompt: {},
+            status: { status_str: t.status_str, messages: [["status", t.status_str]] },
+            outputs: t.outputs,
+            extra_data: {},
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+            finished_at: t.finished_at,
+          };
+        }
+        // Seeded gallery entries (pre-existing models).
+        for (const s of gallerySeed) {
+          out[s.id] = {
+            prompt: {},
+            status: { status_str: "success", messages: [["status", "success"]] },
+            outputs: { "61": { images: [{ filename: "thumb_gold.png", subfolder: "", type: "temp" }] } },
+            extra_data: {},
+            created_at: s.created_at,
+            updated_at: s.created_at,
+            finished_at: s.created_at,
+          };
+        }
+        return send(200, out);
       }
-      m = p.match(/^\/tasks\/([^/]+)\/render$/);
-      if (req.method === "POST" && m) {
-        const id = decodeURIComponent(m[1]);
-        if (!tasks.has(id)) return send(404, { detail: `no such task ${id}` });
-        const b = JSON.parse((await readBody()) || "{}");
-        const n = Math.max(1, Math.min(64, b.nviews ?? 8));
-        return send(200, { images: Array.from({ length: n }, () => TINY_PNG_DATAURL), video: b.video ? [TINY_PNG_DATAURL] : null, note: `rendered ${n} frames (mode=${b.mode || "normal"})` });
+
+      // 6) binary output: /view?filename&subfolder&type
+      if (req.method === "GET" && p === "/view") {
+        const fn = u.searchParams.get("filename") || "";
+        const isGlb = /\.glb$/i.test(fn);
+        const bytes = isGlb
+          ? Buffer.concat([Buffer.from("glTF"), Buffer.alloc(64, 0x42)]) // tiny valid-ish GLB
+          : TINY_PNG_BYTES;
+        res.writeHead(200, {
+          "content-type": isGlb ? "model/gltf-binary" : "image/png",
+          "content-length": bytes.length,
+        });
+        return res.end(bytes);
       }
-      m = p.match(/^\/tasks\/([^/]+)\/remesh$/);
-      if (req.method === "POST" && m) {
-        const id = decodeURIComponent(m[1]);
-        if (!tasks.has(id)) return send(404, { detail: `no such task ${id}` });
-        const b = JSON.parse((await readBody()) || "{}");
-        return send(200, { path: b.dest || id + "_remesh.glb", faces_before: 120000, faces_after: b.face_budget || 50000 });
-      }
-      if (req.method === "GET" && p === "/gallery") {
-        const lim = Math.max(1, parseInt(u.searchParams.get("limit") || "24", 10));
-        const real = [...tasks.values()].map((t) => ({ id: t.id, label: t.label, created_at: t.created_at, model_id: t.model_id, formats: t.formats, thumbnail: TINY_PNG_DATAURL, input_image: TINY_PNG_DATAURL })).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-        return send(200, { items: [...real, ...gallerySeed].slice(0, lim) });
-      }
-      if (req.method === "GET" && p === "/usage") return send(200, usage);
+
       return send(404, { detail: `no mock route for ${req.method} ${p}` });
     } catch (e) {
-      return send(500, { detail: "mock bridge error: " + e.message });
+      return send(500, { detail: "mock comfyui error: " + e.message });
     }
   });
+
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const a = server.address();
@@ -161,9 +282,9 @@ function startMockBridge() {
   });
 }
 
-// --------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Assertions + harness
-// --------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 let passed = 0;
 let failed = 0;
 function check(name, cond, extra = "") {
@@ -177,36 +298,49 @@ function check(name, cond, extra = "") {
 }
 
 async function main() {
-  console.log("\n=== Trellis MCP smoke test (mock DGX bridge) ===\n");
+  console.log("\n=== Trellis MCP smoke test (mock ComfyUI backend) ===\n");
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-smoke-"));
   console.log(`mock out dir: ${outDir}\n`);
-  const mock = await startMockBridge();
-  console.log(`mock bridge up at ${mock.url}\n`);
+  const mock = await startMockComfyUI();
+  console.log(`mock ComfyUI up at ${mock.url}\n`);
   const client = new TrellisBridgeClient({ baseUrl: mock.url, fetchFn: globalThis.fetch });
   const ctx = { client, defaultOutDir: outDir };
 
+  // 1) trellis_health
   console.log("1) trellis_health:");
   let r = await T.makeHealthTool(ctx).handler({});
   check("returns a text result", typeof r.content[0].text === "string");
   const h = dataOf(r);
   check("reports up=true", h.up === true, JSON.stringify({ up: h.up, model_loaded: h.model_loaded }));
-  check("reports model_loaded=true", h.model_loaded === true);
+  check(
+    "app_script is comfyui",
+    h.app_script === "comfyui",
+    JSON.stringify({ app_script: h.app_script }),
+  );
   check("exposes the model id", /TRELLIS/i.test(h.model_id || ""), h.model_id);
 
+  // 2) trellis_start
   console.log("\n2) trellis_start:");
   r = await T.makeStartTool(ctx).handler({ wait_seconds: 30 });
   const st = dataOf(r);
   check("brings the service up", st.ok === true && st.up === true, JSON.stringify(st));
 
+  // 3) trellis_image_to_3d (submit)
   console.log("\n3) trellis_image_to_3d (submit):");
-  r = await T.makeImageTo3DTool(ctx).handler({ image: TINY_PNG_DATAURL, resolution: 512, seed: 7, label: "a tiny test cube" });
+  r = await T.makeImageTo3DTool(ctx).handler({
+    image: TINY_PNG_DATAURL,
+    resolution: 512,
+    seed: 7,
+    label: "a tiny test cube",
+  });
   check("submit is not an error", !r.isError, r.isError ? r.content[0].text : "");
   const sub = dataOf(r);
   const taskId = sub.task_id;
   check("returns a task_id", typeof taskId === "string" && taskId.length > 0, "task_id=" + taskId);
-  check("initial status is non-terminal", !["completed", "succeeded", "failed"].includes((sub.status || "").toLowerCase()), "status=" + sub.status);
+  check("initial status is queued", (sub.status || "").toLowerCase() === "queued", "status=" + sub.status);
 
-  console.log("\n4) trellis_task_status (poll x3 to advance):");
+  // 4) trellis_task_status (poll x3 to advance)
+  console.log("\n4) trellis_task_status (poll x3):");
   const statTool = T.makeTaskStatusTool(ctx);
   const transitions = [];
   for (let i = 1; i <= 3; i++) {
@@ -214,44 +348,83 @@ async function main() {
     const rec = dataOf(r);
     transitions.push({ poll: i, status: rec.status, progress: rec.progress });
   }
-  check("progress advances across polls", (transitions[0].progress ?? 0) <= (transitions[transitions.length - 1].progress ?? 0), "states=" + transitions.map((t) => t.status).join(">"));
+  check(
+    "progress advances across polls",
+    (transitions[0].progress ?? 0) <= (transitions[transitions.length - 1].progress ?? 0),
+    "states=" + transitions.map((t) => t.status).join(">"),
+  );
   const finalRec = transitions[transitions.length - 1];
-  check("reaches a terminal ok state", ["completed", "succeeded"].includes((finalRec.status || "").toLowerCase()), "final=" + finalRec.status);
+  check(
+    "reaches a terminal ok state",
+    ["completed", "succeeded"].includes((finalRec.status || "").toLowerCase()),
+    "final=" + finalRec.status,
+  );
 
+  // 5) trellis_wait_task
   console.log("\n5) trellis_wait_task (resolves since done):");
   r = await T.makeWaitTool(ctx).handler({ task_id: taskId, timeout_seconds: 5 });
   check("wait resolves ok", !r.isError, r.isError ? r.content[0].text : "completed");
 
-  console.log("\n6) trellis_download (STL to disk):");
-  const destStl = path.join(outDir, taskId + ".stl");
-  r = await T.makeDownloadTool(ctx).handler({ task_id: taskId, format: "stl", dest: destStl });
+  // 6) trellis_download (GLB first-class; STL fallback path)
+  console.log("\n6) trellis_download (GLB to disk):");
+  const destGlb = path.join(outDir, taskId + ".glb");
+  r = await T.makeDownloadTool(ctx).handler({ task_id: taskId, format: "glb", dest: destGlb });
   check("download is not an error", !r.isError, r.isError ? r.content[0].text : "");
-  check("the file was written", fs.existsSync(destStl), "bytes=" + (fs.existsSync(destStl) ? fs.statSync(destStl).size : "n/a"));
-  if (fs.existsSync(destStl)) {
-    const head = fs.readFileSync(destStl).subarray(0, 6).toString("latin1");
-    check("payload is STL-shaped", /^solid/i.test(head.trim()) || head.length > 0, "head=" + JSON.stringify(head.trim()));
+  check(
+    "the file was written",
+    fs.existsSync(destGlb),
+    "bytes=" + (fs.existsSync(destGlb) ? fs.statSync(destGlb).size : "n/a"),
+  );
+  if (fs.existsSync(destGlb)) {
+    const head = fs.readFileSync(destGlb).subarray(0, 8).toString("latin1");
+    check("payload is glTF-shaped (magic ok)", head.startsWith("glTF"), "head=" + JSON.stringify(head));
   }
 
+  // 6b) explicit format=stl: the ComfyUI transport has no separate STL step,
+  //     so it falls back to the shipped .glb artifact; the tool must not error.
+  console.log("\n6b) trellis_download (format stl, falls back to glb artifact):");
+  const destStl = path.join(outDir, taskId + ".stl");
+  r = await T.makeDownloadTool(ctx).handler({ task_id: taskId, format: "stl", dest: destStl });
+  check("download with format=stl is not an error", !r.isError, r.isError ? r.content[0].text : "");
+  check("a file was written for format=stl", fs.existsSync(destStl));
+
+  // 7) trellis_render_preview (clay, 4 frames)
   console.log("\n7) trellis_render_preview (clay, 4 frames):");
   r = await T.makeRenderTool(ctx).handler({ task_id: taskId, mode: "clay", nviews: 4 });
   check("render is not an error", !r.isError, r.isError ? r.content[0].text : "");
   const rend = dataOf(r);
   const frames = rend.frames ?? [];
-  check("produced 4 frames", frames.length === 4, "frames=" + frames.length);
-  check("every frame exists on disk", frames.length > 0 && frames.every((f) => fs.existsSync(f)), "first=" + (frames[0] || "none"));
+  check("produced at least one frame", frames.length >= 1, "frames=" + frames.length);
+  // nviews is a cap: render yields one data-url per image file in the
+  // entry's history outputs (the ComfyUI template's RenderMesh→SaveImage.)
+  check(frames.length <= 4, `frames bounded by nviews (got ${frames.length})`);
 
+  // 8) trellis_gallery
   console.log("\n8) trellis_gallery:");
   r = await T.makeGalleryTool(ctx).handler({ limit: 12 });
   const gal = dataOf(r);
-  check("lists items", Array.isArray(gal.items) && gal.items.length > 0, "count=" + (gal.items.length));
-  check("the just-made model is present", gal.items.some((i) => i.id === taskId), "contains_ours=" + gal.items.some((i) => i.id === taskId));
+  check("lists items", Array.isArray(gal.items) && gal.items.length > 0, "count=" + gal.items.length);
+  check(
+    "the just-made model is present",
+    gal.items.some((i) => i.id === taskId),
+    "contains_ours=" + gal.items.some((i) => i.id === taskId),
+  );
   check("every item has a thumbnail", gal.items.every((i) => !!i.thumbnail), "");
 
+  // 9) trellis_usage
   console.log("\n9) trellis_usage:");
   r = await T.makeUsageTool(ctx).handler({});
   const usage = dataOf(r);
-  check("reports a generated count", Number.isFinite(usage.total_generated) && usage.total_generated >= 1, "total_generated=" + usage.total_generated);
-  check("last task is the one we made", usage.last_task_id === taskId, "last=" + usage.last_task_id);
+  check(
+    "reports a generated count",
+    Number.isFinite(usage.total_generated) && usage.total_generated >= 1,
+    "total_generated=" + usage.total_generated,
+  );
+  check(
+    "last task is the one we made",
+    usage.last_task_id === taskId,
+    "last=" + usage.last_task_id,
+  );
 
   console.log(`\n=== SUMMARY: ${passed} passed, ${failed} failed ===`);
   console.log("Artifacts written under: " + outDir);

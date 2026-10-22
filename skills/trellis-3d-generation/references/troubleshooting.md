@@ -8,9 +8,10 @@ dep/token), not the model.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `trellis_health` says **down / unreachable** (bridge ECONNREFUSED/timeout) | Trellis bridge not running (common — stopped to free GPU) | Call `trellis_start` (brings it up + waits). If it does not come up, see below. Tell the user it needs the GPU. |
-| Bridge reachable but `model_loaded=false`, generation stalls | Model not yet loaded into GPU memory (first use) | `trellis_start` with `wait_seconds`; the first load is slow (downloads/loads weights). Subsequent jobs reuse it. |
-| `HTTP 404` / wrong port | Talking to the wrong port (Gradio :7860 vs bridge :7861) or host | Set `TRELLIS_API_URL` to the **bridge** URL (`:7861`), not the Gradio UI. Confirm the container exposes it (0.0.0.0). |
+|| `trellis_health` says **down / unreachable** (ECONNREFUSED/timeout) | The ComfyUI runtime isn't answering at `TRELLIS_API_URL` — commonly stopped to free the GPU | Call `trellis_start` (confirms the runtime then waits until healthy). Tell the user it needs the GPU. |
+|| Runtime reachable but `model_loaded=false`, job stalls | Model not yet loaded for this workflow — on ComfyUI the Trellis.2 UNet/VAEs are loaded per `/api/prompt` | `trellis_start` with `wait_seconds`; the first workflow of a session is the slow one (weights + DINOv3), later workflows reuse it. |
+|| `404` on `/api/prompt` | Talking to the wrong endpoint (e.g. the ComfyUI *dashboard* or the legacy bridge at :7861) | Set `TRELLIS_API_URL` to the **ComfyUI base** (`:8188`, default) — not the Gradio UI, not the legacy bridge. |
+|| `404` on `/upload/image` | `TRELLIS_BACKEND=bridge` was intended but the DGX never ran the legacy FastAPI | Switch `TRELLIS_BACKEND` to `bridge` (and `TRELLIS_BRIDGE_URL` if not :7861) or rebuild the runtime with the ComfyUI frontend installed. |
 
 ## Startup failures (`trellis_start` does not come up)
 

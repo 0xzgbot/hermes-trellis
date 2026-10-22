@@ -1,7 +1,8 @@
 # INSTALL — Trellis plugin for Hermes Agent
 
-Full, end-to-end install: **DGX Spark** (Trellis + bridge), **Mac** (MCP server + skill),
-**Hermes** (wire-up). Each step is independently runnable and verified.
+Full, end-to-end install: **DGX Spark** (ComfyUI + Trellis.2), **Mac**
+(MCP server + skill), **Hermes** (wire-up). Each step is independently
+runnable and verified.
 
 ---
 
@@ -9,62 +10,39 @@ Full, end-to-end install: **DGX Spark** (Trellis + bridge), **Mac** (MCP server 
 
 | Where | Needed | Check |
 |---|---|---|
-| DGX Spark | Docker (Engine + Compose v2 + NVIDIA Container Toolkit) | `docker compose version` |
-| DGX Spark | A **Trellis base image** with the `trellis2` conda env (torch, trellis2, o_voxel, nvdiffrast, flash-attn, flexgemm, ...) | the image your Gradio app (`dr-vij/Trellis2-DGX-Spark-Docker`) runs in |
+| DGX Spark | ComfyUI **0.42** with the **Trellis-2 node classes** installed | `curl -s localhost:8188/system_stats` shows comfyui_version 0.42.0 |
 | DGX Spark | Hugging Face **token** with access to gated models (DINOv3, RMBG-2.0) + `microsoft/TRELLIS.2-4B` in the HF cache | `.env` `HF_TOKEN`; `HF_HOME` |
-| Mac | Node **≥ 18** (Meshy wants 22; we need 18+) | `node -v` |
+| Mac | Node **≥ 18** (Hermes wants 22; we need 18+) | `node -v` |
 | Mac | Reachability to the DGX over the tailnet | `ping <DGX-TAILNET-IP>` |
 
-> You already run Trellis on the Spark (Gradio `:7860`). The bridge is **layered on top of
-> that same runtime** — it does not duplicate the heavy env. If you don't have
-> the Trellis base image yet, build it first (dr-vij's Dockerfile).
+> You already run ComfyUI on the Spark (Gradio `:7860`, separate from the
+> runtime we need). The plugin talks to standard ComfyUI API at `:8188` —
+> it does **not** run or manage ComfyUI itself.
 
 ---
 
-## 1. On the DGX — bring up the bridge
+## 1. On the DGX — have the ComfyUI runtime ready
 
-Clone/check out this repo, then build + run the bridge from `docker/`:
-
-```bash
-cd hermes-trellis/docker
-
-# (a) Build the bridge image. Point BASE_IMAGE at YOUR Trellis image
-#     (the one serving :7860). This layers fastapi/uvicorn/trimesh/scipy
-#     + the trellis_api package on top of it.
-docker compose build trellis_bridge
-
-# (b) Run the bridge (API on :7861, separate from Gradio :7860).
-docker compose up -d trellis_bridge
-
-# (c) Watch it come up (first start loads the env; the model loads on
-#     first use / start).
-docker compose logs -f trellis_bridge
-```
-
-### Verify
+ComfyUI 0.42 is the plugin's runtime; the plugin only calls its API.
 
 ```bash
-curl -s localhost:7861/health
-# { "up": true, "model_loaded": false, "busy": false,
-#   "model_id": "microsoft/TRELLIS.2-4B", "url": "http://<DGX-TAILNET-IP>:7861", ... }
+# 1a. ComfyUI 0.42.0 + the Trellis-2 node classes
+#     (Trellis2Conditioning · Trellis2ShapeStage · Trellis2TextureStage · ... ,
+#      plus VaeDecode*Trellis, EmptyTrellis2LatentStructure, VoxelToMesh,
+#      UNETLoader, VAELoader, KSampler, RenderMesh, SaveGLB/SaveImage).
+#     Load `microsoft/TRELLIS.2-4B` (weights), `dino_v3_vit_l` (RMBG).
+#     A `nodes.json` export listing the installed-template versions is the
+#     check: GET /object_info (or /api/object_info).
+
+# 1b. (Optional, for the legacy bridge) docker/trellis-api on :7861:
+#     cd docker && docker compose up -d trellis_bridge
+#     This is a **second runtime**; the plugin defaults to the ComfyUI one.
 ```
 
-`model_loaded` is `false` until the first job (or an explicit start) loads the
-pipeline into GPU. That is expected and cheap to check.
-
-### .env (in `docker/`)
-
-```
-TRELLIS_BASE_IMAGE=nvcr.io/nvidia/dgx/trellis2:latest   # <-- your Trellis image
-TRELLIS_MODEL_ID=microsoft/TRELLIS.2-4B
-BRIDGE_PORT=7861
-# HF_TOKEN=hf_...        # if the base image doesn't already carry it
-```
-
-### Stop
-
+Verify:
 ```bash
-docker compose down
+curl -s localhost:8188/system_stats | head -c 300   # comfyui_version: "0.42.0", devices: ["cuda"]
+curl -s localhost:8188/api/models/diffusion_models # trellis_2_int8_convrot.safetensors
 ```
 
 ---
@@ -74,85 +52,81 @@ docker compose down
 ```bash
 cd hermes-trellis/mcp
 npm install          # @modelcontextprotocol/sdk, zod, typescript
-npm run build        # tsc -> dist/
+npm run build        # tsc → dist/  (strict, ES2022, Node16)
 npm run typecheck    # optional: tsc --noEmit
 ```
 
 ### Smoke-run it (stdio)
-
 ```bash
 node dist/index.js
-# [trellis-mcp] connected. bridge=http://<DGX-TAILNET-IP>:7861 out=...
+# [trellis-mcp] connected. bridge=http://<DGX-TAILNET-IP>:8188 out=...
 # (waits on stdin for JSON-RPC; Ctrl-C to quit)
 ```
 
-### Run the end-to-end test (mock bridge, no GPU)
-
+### End-to-end test (mock ComfyUI, no GPU)
 ```bash
 cd hermes-trellis
 node tests/smoke.mjs
-# ... 22 passed, 0 failed ...
+# ... 24 passed, 0 failed ...
 ```
+The mock implements the ComfyUI API (`/system_stats`, `/upload/image`,
+`/api/prompt`, `/history/{id}` wrapper, `/history`, `/view`) and drives every
+tool the way the agent does — health → start → image_to_3d → task_status →
+wait_task → download → render → gallery → usage.
 
 ---
 
 ## 3. In Hermes — wire up the MCP server + skill
 
-### 3a. MCP server (config.yaml)
-
+### 3a. MCP server (`~/.hermes/config.yaml`)
 ```yaml
-# ~/.hermes/config.yaml
 mcp_servers:
   trellis:
     command: node
-    args:
-      - "/absolute/path/to/hermes-trellis/mcp/dist/index.js"   # absolute
+    args: ["/absolute/path/to/hermes-trellis/mcp/dist/index.js"]
     env:
-      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:7861"
+      TRELLIS_API_URL: "http://<DGX-TAILNET-IP>:8188"   # ComfyUI (default :8188)
+      TRELLIS_BACKEND: "comfyui"                          # or "bridge" (:7861 legacy)
       TRELLIS_OUT_DIR: "/absolute/path/to/hermes-trellis/trellis-out"
 ```
-
-Reload / restart Hermes so `mcp_servers.trellis` is discovered. Its tools
-(`trellis_health`, `trellis_image_to_3d`, ...) appear alongside built-ins.
+Reload/restart Hermes so `mcp_servers.trellis` is discovered. Its tools
+(`trellis_health`, `trellis_image_to_3d`, …) appear alongside built-ins.
 
 ### 3b. Skill
-
 ```bash
 hermes skills install /absolute/path/to/hermes-trellis/skills/trellis-3d-generation
 ```
-
-(or drop the `trellis-3d-generation/` dir into your skills path.) The agent
-now reads SKILL.md — service-state-first, the image→3D pipeline, delivery,
-and troubleshooting.
+The agent now reads SKILL.md — service-state-first, the ComfyUI
+image→3D pipeline, delivery, and troubleshooting.
 
 ### 3c. Verify in Hermes
-
-```
+```text
 hermes skills list                 # trellis-3d-generation present
+hermes tools list                  # trellis_* tools registered
 ```
 Then a first chat turn: *"Check Trellis health."* → the agent calls
-`trellis_health` and reports up/down/model_loaded. If down: *"Start it."* →
+`trellis_health` and reports up/model_loaded. If down: *"Start it."*
 `trellis_start` (GPU now in use).
 
 ---
 
 ## 4. Desktop integration (optional)
 
-Copy `desktop/plugin.py` into your Hermes desktop plugin path and
-register it. It surfaces the status bar, the in-chat preview
-(`MEDIA:`), and the gallery. Hook names may need a one-line match to
-your desktop SDK version (see `desktop/README.md`).
+Copy `desktop/plugin.py` into your Hermes desktop plugin path and register it.
+It surfaces the status bar, the in-chat preview (`MEDIA:`), and the gallery.
+Hook names may need a one-line match to your desktop SDK version (see
+`desktop/README.md`).
 
 ---
 
 ## 5. Verify the whole thing
 
 ```bash
-# (DGX) bridge healthy
-curl -s <DGX-TAILNET-IP>:7861/health
+# (DGX) ComfyUI runtime healthy
+curl -s <DGX-TAILNET-IP>:8188/system_stats | head -c 200
 
-# (Mac) MCP + contract
-cd hermes-trellis && node tests/smoke.mjs
+# (Mac) MCP server + contract
+cd hermes-trellis && node tests/smoke.mjs        # 24/24
 
 # (Hermes) a real round trip
 #   "Trellis: make a 3D model of [image] at 1024, STL to ~/Desktop/x.stl,
@@ -160,16 +134,5 @@ cd hermes-trellis && node tests/smoke.mjs
 #   -> task completes, x.stl written, clay frame shown in chat.
 ```
 
-When all three are green, you have a working, local, image→STL/3D
-pipeline for Hermes — the Meshy feature set, on your own model.
-
----
-
-## Troubleshooting index
-
-- **`ECONNREFUSED` / health down** → bridge not up → `docker compose up -d trellis_bridge` or `trellis_start`.
-- **`HF 401` / gated model** → token/access on the DGX (DINOv3, RMBG-2.0) + weights in cache.
-- **OOM at 1536** → drop to 1024/512, or free GPU (stop LLM serving).
-- **`trimesh not installed`** → `pip install trimesh[easy]` in the bridge env.
-- **Decimation no-op** → install `fast-simplification` (matching Python) / check trimesh API.
-- **Wrong port** → bridge is `:7861` (Gradio is `:7860`); set `TRELLIS_API_URL`.
+When all three are green you have a working, local, image→STL/3D pipeline for
+Hermes — the Meshy feature set, on your own model.

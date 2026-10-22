@@ -7,30 +7,22 @@ status bar, a gallery). It is the "desktop" counterpart of the MCP
 server + skill: the agent generates a model via the `trellis_*` tools,
 and this plugin makes the *result visible* in the app.
 
-Capabilities
+Architecture
 ------------
-1. **Bundled skill** — registers `trellis-3d-generation` as
-   `plugin:skill`, so the agent knows the pipeline.
-2. **Rendered models in chat** — when a generation completes,
-   render a preview frame and surface it as a `MEDIA:` image inline
-   in the conversation.
-3. **Status bar** — surfaces Trellis service state (running/stopped)
-   + usage (models generated, GPU-time) on the desktop status bar.
-4. **Gallery** — a view/montage of all models generated (thumbnails +
-   labels), on request or as a panel.
+ComfyUI 0.42 is the runtime on the DGX (:8188); this plugin talks to
+its standard endpoints:
+  GET  /system_stats   → health (up / model_loaded / busy / model_id)
+  GET  /history       → the flat list the gallery + usage read from
+  GET  /view?filename&... → binary outputs (preview PNG, exported files)
 
-Integration surface
---------------------
-The exact hook/registration API depends on the current Hermes desktop
-plugin SDK. This module follows the documented plugin pattern (an
-entrypoint receiving a context with `register_skill` and tool/hook
-registration, plus a small client to the Trellis bridge for the
-status/gallery). Adjust the registration calls to your desktop SDK
-version; the logic (what to show, when) is SDK-independent.
+The MCP server (`mcp/dist/index.js`) and the skill (`trellis-3d-generation`)
+do the generation; the desktop plugin only *surfaces* it. Render previews
+used in chat come from the agent's `trellis_render_preview` tool
+(`MEDIA:<frame>`), not from this plugin.
 
 Env:
-  TRELLIS_API_URL  bridge base URL (default http://127.0.0.1:7861)
-  TRELLIS_OUT_DIR   where previews/exports land
+  TRELLIS_API_URL  ComfyUI base URL (default http://127.0.0.1:8188)
+  TRELLIS_OUT_DIR  where previews/exports land
 """
 
 from __future__ import annotations
@@ -43,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 # ----------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------
-API_URL = os.environ.get("TRELLIS_API_URL", "http://127.0.0.1:7861").rstrip("/")
+API_URL = os.environ.get("TRELLIS_API_URL", "http://127.0.0.1:8188").rstrip("/")
 OUT_DIR = Path(os.environ.get("TRELLIS_OUT_DIR",
                                     Path(__file__).resolve().parent / "out"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)

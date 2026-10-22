@@ -1,6 +1,6 @@
 ---
 name: trellis-3d-generation
-description: "Turn an image into a fully-textured 3D model (GLB/STL/OBJ/FBX/USDZ) with the local Trellis.2 model on the DGX Spark: generate, PBR-texture, decimate/remesh, HDRI-render a preview, download the file, and track it in the gallery. Use for image->3D and image->STL (casting/printing); there is no text-to-3D here."
+description: "Turn an image into a fully-textured 3D model (GLB/STL/OBJ/FBX/USDZ) with the local Trellis.2 model on the DGX Spark, driven through standard ComfyUI 0.42 at :8188: generate, PBR-texture, decimate/remesh, HDRI-render a preview, download the file, and track it in the gallery. Use for image->3D and image->STL (casting/printing); there is no text-to-3D here."
 license: MIT
 ---
 

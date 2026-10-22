@@ -81,11 +81,11 @@ export function makeStartTool(ctx: ToolContext) {
   const { client } = ctx;
   return {
     name: "trellis_start",
-    desc: "Bring the local Trellis service up (docker compose / python app on the DGX) and wait until healthy. Use when trellis_health shows it down and the user wants to generate a model now. NOTE: loading grabs the GPU, so surface this to the user when it competes with TensorFold.",
+    desc: "Start (or confirm) the local Trellis runtime on the DGX and wait until it is healthy — use when trellis_health shows it down and the user wants to generate a model now. NOTE: bringing it up grabs the GPU, so surface the contention to the user (it may slow or preempt other LLM serving, e.g. TensorFold).",
     schema: z
       .object({
-        wait_seconds: z.number().int().min(1).max(900).optional().describe("How long (s) to wait for the model to load."),
-        app_script: z.string().optional().describe("Which app to serve: 'app.py' (image->3D) or 'app_texturing.py' (PBR)."),
+        wait_seconds: z.number().int().min(1).max(900).optional().describe("How long (s) to wait for the runtime to be ready / models to load."),
+        app_script: z.string().optional().describe("(legacy-bridge only) which app to serve: 'app.py' (image->3D) or 'app_texturing.py' (PBR). Ignored by the comfyui backend."),
       })
       .strict(),
     async handler(a: Record<string, unknown>): Promise<ToolResult> {
