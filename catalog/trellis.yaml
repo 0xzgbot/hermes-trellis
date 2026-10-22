@@ -1,9 +1,9 @@
-# Copy to NousResearch/hermes-agent as plugin-catalog/trellis.yaml.
-# sha is the commit the catalog installs. It is the disclosure commit, not this file's commit.
+# Copy this file to NousResearch/hermes-agent as plugin-catalog/trellis.yaml.
+# sha is the commit the catalog installs.
 name: trellis
 title: Trellis
 repo: https://github.com/0xzgbot/hermes-trellis
-sha: "7692f1075ec677fa0ffbb1cd65cd049ae57b126b"
+sha: "0119a8175f0eef13118b2c8d9700588d7e302cbb"
 description: "Local photo to a printable STL. Trellis.2 runs on a ComfyUI host you already have; this plugin does not install it. Disclosure — calls only TRELLIS_API_URL (default http://127.0.0.1:8188), uploads the photo, and downloads the GLB and preview PNGs; writes meshes to the path you name or TRELLIS_OUT_DIR; trellis_open_slicer launches a local slicer on one .stl; the desktop card reads one model file under your home directory or TRELLIS_OUT_DIR; first start runs npm ci in mcp/ when dist/ is missing. No API key and no telemetry."
 maintainer: 0xzgbot
 tier: community
