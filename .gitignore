@@ -3,6 +3,7 @@ dist/
 __pycache__/
 *.pyc
 out/
+trellis-out/
 hf_cache/
 torch_cache/
 .DS_Store
