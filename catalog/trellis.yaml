@@ -8,7 +8,7 @@ description: "Local photo to a printable STL. Trellis.2 runs on a ComfyUI host y
 maintainer: 0xzgbot
 tier: community
 category: tools
-requires_hermes: ">=0.21.0"
+requires_hermes: ">=0.21.6"
 docs_url: https://github.com/0xzgbot/hermes-trellis#readme
 version: "0.2.0"
 readme: true
