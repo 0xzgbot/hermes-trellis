@@ -10,15 +10,15 @@ with `format: "stl"` converts that GLB on the Hermes machine and checks
 `size == 84 + 50 * faces`. There is no `TRELLIS_MODEL_ID` switch. The graph
 loads `trellis_2_int8_convrot.safetensors` by name.
 
-## What an agent can install from this repo
+## What this repo installs
 
-An agent pointed at this GitHub repo can install the Hermes plugin, the skill, and the desktop card. `mcp/run.sh` runs `npm install` and `npm run build` on first start. Node and npm must already be on the Hermes machine.
+This repo installs the Hermes plugin, the skill, and the desktop card. On first start, `mcp/run.sh` builds the Node server. Node and npm must already be installed.
 
-It cannot install Trellis. A GPU being present is not enough. ComfyUI 0.42 must already be running on that machine, with the Trellis.2 nodes loaded (`Trellis2ShapeStage`, `SaveGLB`, `RenderMesh`, `RotateMesh`) and the weight files on disk. This repo does not download those weights and does not start ComfyUI. `trellis_start` only checks that port 8188 answers.
+It does not install Trellis. ComfyUI 0.42 with the Trellis.2 nodes and weights must already be running on the GPU. A GPU with nothing on it is not enough. `trellis_start` only checks port 8188.
 
-The ComfyUI address is not in this repo. Set `TRELLIS_API_URL` to `http://<gpu-host>:8188` before expecting `trellis_health` to succeed.
+Set `TRELLIS_API_URL` to `http://<gpu-host>:8188`. That address is not in the repo.
 
-`run.sh` does not install Python packages. STL conversion needs `TRELLIS_PYTHON` pointed at an interpreter that already has `trimesh`. `face_budget` also needs `fast-simplification` in that same interpreter. Without `trimesh`, a GLB download still works and an STL download fails.
+Set `TRELLIS_PYTHON` to a Python that already has `trimesh`. `face_budget` also needs `fast-simplification`. The Node build does not install either package.
 
 ## What it gives you
 

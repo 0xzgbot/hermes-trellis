@@ -4,9 +4,7 @@ One photo in, a binary STL out. The GPU work runs on a machine that already
 has ComfyUI and Trellis.2. Hermes, the MCP server, and the STL file run on
 the computer you chat from (the Mac, in this setup).
 
-No cloud API and no subscription. The plugin does not install ComfyUI, does not download weights, and does not start or stop ComfyUI.
-
-An agent cloning this repo can install the Hermes side only. The GPU host must already be serving ComfyUI 0.42 with Trellis.2 loaded. The agent must be given `TRELLIS_API_URL`. `mcp/run.sh` builds the Node server. It does not install `trimesh` or `fast-simplification`.
+No cloud API and no subscription. See the README section "What this repo installs" for what a clone can and cannot set up.
 
 ## Where each step runs
 
