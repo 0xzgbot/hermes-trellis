@@ -3,7 +3,7 @@
 name: trellis
 title: Trellis
 repo: https://github.com/0xzgbot/hermes-trellis
-sha: "0119a8175f0eef13118b2c8d9700588d7e302cbb"
+sha: "52dacdedb71141ff7c1bf6671dba1a32b90858bf"
 description: "Local photo to a printable STL. Trellis.2 runs on a ComfyUI host you already have; this plugin does not install it. Surfaces: 12 MCP tools, one skill, a desktop orbit card, and a dashboard status route. Disclosure — talks to TRELLIS_API_URL (default http://127.0.0.1:8188), including its websocket. With TRELLIS_BACKEND=bridge it talks to TRELLIS_BRIDGE_URL (default http://127.0.0.1:7861). An http(s) image argument is downloaded on the Hermes machine and uploaded to that host. Writes meshes to the path you name or TRELLIS_OUT_DIR and runs TRELLIS_PYTHON on mcp/print_mesh.py for STL and OBJ. trellis_open_slicer launches open, xdg-open, or explorer.exe on one .stl. trellis_wait_task blocks that tool call until the job ends or its timeout (default 1800s, max 3600s) and starts no background process. The dashboard reads any .glb, .gltf, .stl, or .png under the home directory or TRELLIS_OUT_DIR. First start runs npm ci in mcp/ when dist/ is missing and writes node_modules. No API key, no credential file, no telemetry. docker/trellis-api is not started by Hermes; if you start it yourself it can download an image URL and run nvidia-smi, gltf-transform, or Blender."
 maintainer: 0xzgbot
 tier: community
